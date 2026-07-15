@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.PackingMonitor" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#1F7A5C</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">#F6F7F9</item>
+    </style>
+</resources>
