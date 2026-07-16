@@ -302,7 +302,7 @@ class MonitoringStateMachine(
         nowMillis: Long,
         policy: ClearancePolicy,
     ): MonitoringSnapshot {
-        if (isPackingActivity(detection, policy)) {
+        if (isActiveWorkStillHappening(detection)) {
             return previous.transitionTo(
                 state = MonitoringState.PackingActive,
                 nowMillis = nowMillis,

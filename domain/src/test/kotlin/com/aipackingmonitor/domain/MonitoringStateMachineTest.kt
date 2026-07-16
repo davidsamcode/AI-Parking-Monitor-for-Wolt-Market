@@ -107,6 +107,48 @@ class MonitoringStateMachineTest {
     }
 
     @Test
+    fun `leftover alert continues while leftover remains without movement`() {
+        val scanning = postPackScanAt(5_000)
+        val alerting = stateMachine.reduce(
+            previous = scanning,
+            zone = zone,
+            detection = detection(score = 0.24f, motion = 0.01f, largestRegion = 0.2f),
+            nowMillis = 6_100,
+        )
+
+        val stillAlerting = stateMachine.reduce(
+            previous = alerting,
+            zone = zone,
+            detection = detection(score = 0.26f, motion = 0.01f, largestRegion = 0.22f),
+            nowMillis = 7_000,
+        )
+
+        assertEquals(MonitoringState.LeftoverAlert, stillAlerting.state)
+        assertEquals(alerting.alertStartedAtMillis, stillAlerting.alertStartedAtMillis)
+    }
+
+    @Test
+    fun `leftover alert stops when movement starts so scan can restart`() {
+        val scanning = postPackScanAt(5_000)
+        val alerting = stateMachine.reduce(
+            previous = scanning,
+            zone = zone,
+            detection = detection(score = 0.24f, motion = 0.01f, largestRegion = 0.2f),
+            nowMillis = 6_100,
+        )
+
+        val packing = stateMachine.reduce(
+            previous = alerting,
+            zone = zone,
+            detection = detection(score = 0.24f, motion = 0.09f, largestRegion = 0.2f, stable = false),
+            nowMillis = 7_000,
+        )
+
+        assertEquals(MonitoringState.PackingActive, packing.state)
+        assertEquals(null, packing.alertStartedAtMillis)
+    }
+
+    @Test
     fun `post pack scan resets when table matches reference`() {
         val scanning = postPackScanAt(5_000)
 
