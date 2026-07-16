@@ -40,11 +40,13 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -62,6 +64,7 @@ fun MonitoringRoute(
     viewModel: MonitoringViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    KeepScreenAwake(uiState.monitoringEnabled)
     MonitoringScreen(
         uiState = uiState,
         onCameraPermissionChanged = viewModel::onCameraPermissionChanged,
@@ -82,6 +85,17 @@ fun MonitoringRoute(
         onDraftZoneChanged = viewModel::updateDraftZoneBounds,
         onSaveAreaSetup = viewModel::saveAreaSetup,
     )
+}
+
+@Composable
+private fun KeepScreenAwake(enabled: Boolean) {
+    val view = LocalView.current
+    DisposableEffect(enabled, view) {
+        view.keepScreenOn = enabled
+        onDispose {
+            view.keepScreenOn = false
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
