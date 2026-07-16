@@ -54,7 +54,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aipackingmonitor.data.AlertEventEntity
 import com.aipackingmonitor.domain.model.MonitoringState
+import com.aipackingmonitor.domain.model.MonitoringZone
 import com.aipackingmonitor.domain.model.NormalizedRect
+import com.aipackingmonitor.domain.model.ZoneType
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -70,10 +72,10 @@ fun MonitoringRoute(
         onCameraPermissionChanged = viewModel::onCameraPermissionChanged,
         onDetection = viewModel::onDetection,
         onReferenceCaptured = viewModel::onReferenceCaptureResult,
-        onCartReferenceCaptured = viewModel::onCartReferenceCaptureResult,
         onReferenceAvailabilityChanged = viewModel::onReferenceAvailabilityChanged,
         onCaptureReference = viewModel::requestReferenceCapture,
         onCaptureCartReference = viewModel::requestCartReferenceCapture,
+        onCaptureAdditionalReference = viewModel::requestAdditionalReferenceCapture,
         onToggleMonitoring = viewModel::toggleMonitoring,
         onDismissAlert = viewModel::dismissAlert,
         onMarkFeedback = viewModel::markFeedback,
@@ -82,8 +84,12 @@ fun MonitoringRoute(
         onAlertDelayChanged = viewModel::updateAlertDelay,
         onAlarmVolumeChanged = viewModel::updateAlarmVolume,
         onVibrationChanged = viewModel::updateVibrationEnabled,
+        onAddTableZone = viewModel::addAdditionalTableZone,
+        onAddCartZone = viewModel::addAdditionalCartZone,
+        onRemoveAdditionalZone = viewModel::removeAdditionalZone,
         onStartAreaSetup = viewModel::startAreaSetup,
         onStartCartAreaSetup = viewModel::startCartAreaSetup,
+        onStartAdditionalAreaSetup = viewModel::startAdditionalAreaSetup,
         onCancelAreaSetup = viewModel::cancelAreaSetup,
         onDraftZoneChanged = viewModel::updateDraftZoneBounds,
         onSaveAreaSetup = viewModel::saveAreaSetup,
@@ -107,11 +113,11 @@ private fun MonitoringScreen(
     uiState: MonitoringUiState,
     onCameraPermissionChanged: (Boolean) -> Unit,
     onDetection: (com.aipackingmonitor.domain.model.DetectionResult) -> Unit,
-    onReferenceCaptured: (Boolean) -> Unit,
-    onCartReferenceCaptured: (Boolean) -> Unit,
+    onReferenceCaptured: (String, Boolean) -> Unit,
     onReferenceAvailabilityChanged: (String, Boolean) -> Unit,
     onCaptureReference: () -> Unit,
     onCaptureCartReference: () -> Unit,
+    onCaptureAdditionalReference: (String) -> Unit,
     onToggleMonitoring: () -> Unit,
     onDismissAlert: () -> Unit,
     onMarkFeedback: (Boolean) -> Unit,
@@ -120,8 +126,12 @@ private fun MonitoringScreen(
     onAlertDelayChanged: (Long) -> Unit,
     onAlarmVolumeChanged: (Int) -> Unit,
     onVibrationChanged: (Boolean) -> Unit,
+    onAddTableZone: () -> Unit,
+    onAddCartZone: () -> Unit,
+    onRemoveAdditionalZone: (String) -> Unit,
     onStartAreaSetup: () -> Unit,
     onStartCartAreaSetup: () -> Unit,
+    onStartAdditionalAreaSetup: (String) -> Unit,
     onCancelAreaSetup: () -> Unit,
     onDraftZoneChanged: (NormalizedRect) -> Unit,
     onSaveAreaSetup: () -> Unit,
@@ -165,7 +175,6 @@ private fun MonitoringScreen(
                         uiState = uiState,
                         onDetection = onDetection,
                         onReferenceCaptured = onReferenceCaptured,
-                        onCartReferenceCaptured = onCartReferenceCaptured,
                         onReferenceAvailabilityChanged = onReferenceAvailabilityChanged,
                         modifier = Modifier.fillMaxSize(),
                     )
@@ -178,16 +187,27 @@ private fun MonitoringScreen(
                 onCaptureCartReference = onCaptureCartReference,
                 onToggleMonitoring = onToggleMonitoring,
                 onDismissAlert = onDismissAlert,
+                onAddTableZone = onAddTableZone,
+                onAddCartZone = onAddCartZone,
                 onStartAreaSetup = onStartAreaSetup,
                 onStartCartAreaSetup = onStartCartAreaSetup,
                 onCancelAreaSetup = onCancelAreaSetup,
                 onSaveAreaSetup = onSaveAreaSetup,
             )
 
+            AdditionalZonesPanel(
+                uiState = uiState,
+                onCaptureReference = onCaptureAdditionalReference,
+                onStartAreaSetup = onStartAdditionalAreaSetup,
+                onRemoveZone = onRemoveAdditionalZone,
+            )
+
             if (uiState.areaSetupActive) {
+                val setupZone = uiState.setupZone()
                 AreaSetupPanel(
                     bounds = uiState.draftZoneBounds,
-                    target = uiState.areaSetupTarget,
+                    zoneName = setupZone?.name ?: "Selected zone",
+                    isCart = setupZone?.type == ZoneType.Tote,
                     onBoundsChanged = onDraftZoneChanged,
                 )
             }
@@ -346,6 +366,8 @@ private fun ControlsPanel(
     onCaptureCartReference: () -> Unit,
     onToggleMonitoring: () -> Unit,
     onDismissAlert: () -> Unit,
+    onAddTableZone: () -> Unit,
+    onAddCartZone: () -> Unit,
     onStartAreaSetup: () -> Unit,
     onStartCartAreaSetup: () -> Unit,
     onCancelAreaSetup: () -> Unit,
@@ -410,6 +432,30 @@ private fun ControlsPanel(
             }
         }
 
+        FilledTonalButton(
+            shape = RoundedCornerShape(8.dp),
+            onClick = onAddTableZone,
+            enabled = !uiState.areaSetupActive && uiState.additionalZones.size < MAX_ADDITIONAL_ZONES,
+        ) {
+            Icon(Icons.Default.Settings, contentDescription = null)
+            Text(
+                modifier = Modifier.padding(start = 8.dp),
+                text = "Add table",
+            )
+        }
+
+        FilledTonalButton(
+            shape = RoundedCornerShape(8.dp),
+            onClick = onAddCartZone,
+            enabled = !uiState.areaSetupActive && uiState.additionalZones.size < MAX_ADDITIONAL_ZONES,
+        ) {
+            Icon(Icons.Default.Settings, contentDescription = null)
+            Text(
+                modifier = Modifier.padding(start = 8.dp),
+                text = "Add cart",
+            )
+        }
+
         if (uiState.areaSetupActive) {
             FilledTonalButton(
                 shape = RoundedCornerShape(8.dp),
@@ -458,10 +504,151 @@ private fun ControlsPanel(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AdditionalZonesPanel(
+    uiState: MonitoringUiState,
+    onCaptureReference: (String) -> Unit,
+    onStartAreaSetup: (String) -> Unit,
+    onRemoveZone: (String) -> Unit,
+) {
+    if (uiState.additionalZones.isEmpty()) return
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Additional zones",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            uiState.additionalZones.forEach { zoneState ->
+                AdditionalZoneRow(
+                    zoneState = zoneState,
+                    cameraReady = uiState.cameraPermissionGranted,
+                    setupActive = uiState.areaSetupActive,
+                    onCaptureReference = onCaptureReference,
+                    onStartAreaSetup = onStartAreaSetup,
+                    onRemoveZone = onRemoveZone,
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AdditionalZoneRow(
+    zoneState: MonitoredZoneUiState,
+    cameraReady: Boolean,
+    setupActive: Boolean,
+    onCaptureReference: (String) -> Unit,
+    onStartAreaSetup: (String) -> Unit,
+    onRemoveZone: (String) -> Unit,
+) {
+    val state = zoneState.snapshot.state
+    val color = when {
+        !zoneState.referenceReady -> Color(0xFF60A5FA)
+        !zoneState.present -> Color(0xFFF59E0B)
+        else -> statusColor(state)
+    }
+    val status = when {
+        !zoneState.referenceReady -> "Reference needed"
+        !zoneState.present -> "Away"
+        state == MonitoringState.LeftoverAlert -> "Check zone"
+        else -> state.name
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = color.copy(alpha = 0.10f),
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = zoneState.zone.name,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = "$status - ${percent(zoneState.snapshot.occupancyScore)} - ${zoneState.snapshot.changeClassification.name}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Text(
+                    text = if (zoneState.zone.type == ZoneType.Tote) "Cart" else "Table",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = color,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilledTonalButton(
+                    shape = RoundedCornerShape(8.dp),
+                    onClick = { onCaptureReference(zoneState.zone.id) },
+                    enabled = cameraReady && !setupActive,
+                ) {
+                    Icon(Icons.Default.PhotoCamera, contentDescription = null)
+                    Text(
+                        modifier = Modifier.padding(start = 8.dp),
+                        text = "Capture",
+                    )
+                }
+                OutlinedButton(
+                    shape = RoundedCornerShape(8.dp),
+                    onClick = { onStartAreaSetup(zoneState.zone.id) },
+                    enabled = cameraReady && !setupActive,
+                ) {
+                    Icon(Icons.Default.Settings, contentDescription = null)
+                    Text(
+                        modifier = Modifier.padding(start = 8.dp),
+                        text = "Set area",
+                    )
+                }
+                OutlinedButton(
+                    shape = RoundedCornerShape(8.dp),
+                    onClick = { onRemoveZone(zoneState.zone.id) },
+                    enabled = !setupActive,
+                ) {
+                    Icon(Icons.Default.Close, contentDescription = null)
+                    Text(
+                        modifier = Modifier.padding(start = 8.dp),
+                        text = "Remove",
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun AreaSetupPanel(
     bounds: NormalizedRect,
-    target: AreaSetupTarget,
+    zoneName: String,
+    isCart: Boolean,
     onBoundsChanged: (NormalizedRect) -> Unit,
 ) {
     Card(
@@ -474,19 +661,15 @@ private fun AreaSetupPanel(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = when (target) {
-                    AreaSetupTarget.Table -> "Packing table crop"
-                    AreaSetupTarget.Cart -> "Cart crop"
-                },
+                text = "$zoneName crop",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                text = when (target) {
-                    AreaSetupTarget.Table ->
-                        "Adjust the blue rectangle so it covers only the table surface checked after packing."
-                    AreaSetupTarget.Cart ->
-                        "Adjust the blue rectangle so it covers the parked cart baskets, not the floor or shelves."
+                text = if (isCart) {
+                    "Adjust the blue rectangle so it covers the parked cart baskets, not the floor or shelves."
+                } else {
+                    "Adjust the blue rectangle so it covers only the table surface checked after packing."
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -877,6 +1060,14 @@ private fun statusColor(state: MonitoringState): Color =
         MonitoringState.Paused -> Color(0xFF355C7D)
     }
 
+private fun MonitoringUiState.setupZone(): MonitoringZone? =
+    when (areaSetupTarget) {
+        AreaSetupTarget.Table -> zone
+        AreaSetupTarget.Cart -> cartZone
+        AreaSetupTarget.Additional ->
+            additionalZones.firstOrNull { it.zone.id == areaSetupZoneId }?.zone
+    }
+
 private fun NormalizedRect.copySafe(
     left: Float = this.left,
     top: Float = this.top,
@@ -913,3 +1104,4 @@ private fun time(ms: Long): String =
     SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(ms))
 
 private const val MIN_ZONE_SIZE = 0.06f
+private const val MAX_ADDITIONAL_ZONES = 4

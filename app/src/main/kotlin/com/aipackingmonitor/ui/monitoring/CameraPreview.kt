@@ -45,8 +45,8 @@ import com.aipackingmonitor.domain.model.MonitoringZone
 import com.aipackingmonitor.domain.model.NormalizedRect
 import com.aipackingmonitor.vision.FrameDifferencingDetector
 import kotlin.math.max
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 @Composable
@@ -102,73 +102,53 @@ fun CameraPermissionGate(
 fun CameraPreviewPanel(
     uiState: MonitoringUiState,
     onDetection: (DetectionResult) -> Unit,
-    onReferenceCaptured: (Boolean) -> Unit,
-    onCartReferenceCaptured: (Boolean) -> Unit,
+    onReferenceCaptured: (String, Boolean) -> Unit,
     onReferenceAvailabilityChanged: (String, Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val zoneStates = uiState.cameraZoneStates()
     Box(
         modifier = modifier
             .background(Color.Black),
     ) {
         CameraFeed(
-            zone = uiState.zone,
-            cartZone = uiState.cartZone,
-            referenceCaptureRequest = uiState.referenceCaptureRequest,
-            cartReferenceCaptureRequest = uiState.cartReferenceCaptureRequest,
+            zoneRequests = zoneStates.map { state ->
+                CameraZoneFrameState(
+                    zone = state.zone,
+                    referenceCaptureRequest = state.referenceCaptureRequest,
+                )
+            },
             onDetection = onDetection,
             onReferenceCaptured = onReferenceCaptured,
-            onCartReferenceCaptured = onCartReferenceCaptured,
             onReferenceAvailabilityChanged = onReferenceAvailabilityChanged,
         )
-        ZoneOverlay(
-            zone = if (uiState.areaSetupActive) {
-                when (uiState.areaSetupTarget) {
-                    AreaSetupTarget.Table -> uiState.zone.copy(bounds = uiState.draftZoneBounds)
-                    AreaSetupTarget.Cart -> uiState.zone
-                }
-            } else {
-                uiState.zone
-            },
-            state = uiState.snapshot.state,
-            suspectedRegion = if (uiState.snapshot.state == MonitoringState.LeftoverAlert) {
-                uiState.snapshot.changedRegionBounds
-            } else {
-                null
-            },
-            setupActive = uiState.areaSetupActive && uiState.areaSetupTarget == AreaSetupTarget.Table,
-            modifier = Modifier.fillMaxSize(),
-        )
-        ZoneOverlay(
-            zone = if (uiState.areaSetupActive) {
-                when (uiState.areaSetupTarget) {
-                    AreaSetupTarget.Table -> uiState.cartZone
-                    AreaSetupTarget.Cart -> uiState.cartZone.copy(bounds = uiState.draftZoneBounds)
-                }
-            } else {
-                uiState.cartZone
-            },
-            state = uiState.cartSnapshot.state,
-            suspectedRegion = if (uiState.cartSnapshot.state == MonitoringState.LeftoverAlert) {
-                uiState.cartSnapshot.changedRegionBounds
-            } else {
-                null
-            },
-            setupActive = uiState.areaSetupActive && uiState.areaSetupTarget == AreaSetupTarget.Cart,
-            modifier = Modifier.fillMaxSize(),
-        )
+        zoneStates.forEach { zoneState ->
+            val setupActive = uiState.areaSetupActive &&
+                uiState.areaSetupZoneId == zoneState.zone.id
+            ZoneOverlay(
+                zone = if (setupActive) {
+                    zoneState.zone.copy(bounds = uiState.draftZoneBounds)
+                } else {
+                    zoneState.zone
+                },
+                state = zoneState.snapshot.state,
+                suspectedRegion = if (zoneState.snapshot.state == MonitoringState.LeftoverAlert) {
+                    zoneState.snapshot.changedRegionBounds
+                } else {
+                    null
+                },
+                setupActive = setupActive,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
     }
 }
 
 @Composable
 private fun CameraFeed(
-    zone: MonitoringZone,
-    cartZone: MonitoringZone,
-    referenceCaptureRequest: Long,
-    cartReferenceCaptureRequest: Long,
+    zoneRequests: List<CameraZoneFrameState>,
     onDetection: (DetectionResult) -> Unit,
-    onReferenceCaptured: (Boolean) -> Unit,
-    onCartReferenceCaptured: (Boolean) -> Unit,
+    onReferenceCaptured: (String, Boolean) -> Unit,
     onReferenceAvailabilityChanged: (String, Boolean) -> Unit,
 ) {
     val context = LocalContext.current
@@ -181,37 +161,18 @@ private fun CameraFeed(
     }
     val detector = remember { FrameDifferencingDetector(context) }
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
-    val captureRequest = remember { AtomicLong(referenceCaptureRequest) }
-    val handledCaptureRequest = remember { AtomicLong(referenceCaptureRequest) }
-    val cartCaptureRequest = remember { AtomicLong(cartReferenceCaptureRequest) }
-    val handledCartCaptureRequest = remember { AtomicLong(cartReferenceCaptureRequest) }
-    val zoneRef = remember { AtomicReference(zone) }
-    val cartZoneRef = remember { AtomicReference(cartZone) }
+    val zoneRequestsRef = remember { AtomicReference(zoneRequests) }
+    val handledCaptureRequests = remember { ConcurrentHashMap<String, Long>() }
     val mainExecutor = remember(context) { ContextCompat.getMainExecutor(context) }
 
-    LaunchedEffect(referenceCaptureRequest) {
-        captureRequest.set(referenceCaptureRequest)
-    }
-
-    LaunchedEffect(cartReferenceCaptureRequest) {
-        cartCaptureRequest.set(cartReferenceCaptureRequest)
-    }
-
-    LaunchedEffect(detector) {
-        val zoneSnapshot = zoneRef.get()
-        val cartZoneSnapshot = cartZoneRef.get()
-        onReferenceAvailabilityChanged(zoneSnapshot.id, detector.hasReference(zoneSnapshot))
-        onReferenceAvailabilityChanged(cartZoneSnapshot.id, detector.hasReference(cartZoneSnapshot))
-    }
-
-    LaunchedEffect(zone) {
-        zoneRef.set(zone)
-        onReferenceAvailabilityChanged(zone.id, detector.hasReference(zone))
-    }
-
-    LaunchedEffect(cartZone) {
-        cartZoneRef.set(cartZone)
-        onReferenceAvailabilityChanged(cartZone.id, detector.hasReference(cartZone))
+    LaunchedEffect(detector, zoneRequests) {
+        zoneRequestsRef.set(zoneRequests)
+        zoneRequests.forEach { request ->
+            onReferenceAvailabilityChanged(
+                request.zone.id,
+                detector.hasReference(request.zone),
+            )
+        }
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -229,36 +190,28 @@ private fun CameraFeed(
                     .also { imageAnalysis ->
                         imageAnalysis.setAnalyzer(cameraExecutor) { image ->
                             try {
-                                val requested = captureRequest.get()
-                                val zoneSnapshot = zoneRef.get()
-                                val cartRequested = cartCaptureRequest.get()
-                                val cartZoneSnapshot = cartZoneRef.get()
-                                if (requested > handledCaptureRequest.get()) {
-                                    val captured = detector.captureReference(image, zoneSnapshot)
-                                    handledCaptureRequest.set(requested)
+                                val requests = zoneRequestsRef.get()
+                                val pendingCapture = requests.firstOrNull { request ->
+                                    request.referenceCaptureRequest >
+                                        (handledCaptureRequests[request.zone.id] ?: 0L)
+                                }
+                                if (pendingCapture != null) {
+                                    val captured = detector.captureReference(image, pendingCapture.zone)
+                                    handledCaptureRequests[pendingCapture.zone.id] =
+                                        pendingCapture.referenceCaptureRequest
                                     mainExecutor.execute {
-                                        onReferenceCaptured(captured)
+                                        onReferenceCaptured(pendingCapture.zone.id, captured)
                                         onReferenceAvailabilityChanged(
-                                            zoneSnapshot.id,
-                                            detector.hasReference(zoneSnapshot),
-                                        )
-                                    }
-                                } else if (cartRequested > handledCartCaptureRequest.get()) {
-                                    val captured = detector.captureReference(image, cartZoneSnapshot)
-                                    handledCartCaptureRequest.set(cartRequested)
-                                    mainExecutor.execute {
-                                        onCartReferenceCaptured(captured)
-                                        onReferenceAvailabilityChanged(
-                                            cartZoneSnapshot.id,
-                                            detector.hasReference(cartZoneSnapshot),
+                                            pendingCapture.zone.id,
+                                            detector.hasReference(pendingCapture.zone),
                                         )
                                     }
                                 } else {
-                                    val detection = detector.detect(image, zoneSnapshot)
-                                    val cartDetection = detector.detect(image, cartZoneSnapshot)
+                                    val detections = requests.map { request ->
+                                        detector.detect(image, request.zone)
+                                    }
                                     mainExecutor.execute {
-                                        onDetection(detection)
-                                        onDetection(cartDetection)
+                                        detections.forEach(onDetection)
                                     }
                                 }
                             } finally {
@@ -292,6 +245,29 @@ private fun CameraFeed(
         factory = { previewView },
     )
 }
+
+private data class CameraZoneFrameState(
+    val zone: MonitoringZone,
+    val referenceCaptureRequest: Long,
+)
+
+private fun MonitoringUiState.cameraZoneStates(): List<MonitoredZoneUiState> =
+    listOf(
+        MonitoredZoneUiState(
+            zone = zone,
+            snapshot = snapshot,
+            referenceReady = referenceReady,
+            referenceCaptureRequest = referenceCaptureRequest,
+            present = true,
+        ),
+        MonitoredZoneUiState(
+            zone = cartZone,
+            snapshot = cartSnapshot,
+            referenceReady = cartReferenceReady,
+            referenceCaptureRequest = cartReferenceCaptureRequest,
+            present = cartPresent,
+        ),
+    ) + additionalZones
 
 @Composable
 private fun ZoneOverlay(

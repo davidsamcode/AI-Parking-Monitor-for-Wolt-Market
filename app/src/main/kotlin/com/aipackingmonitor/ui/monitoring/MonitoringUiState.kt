@@ -29,8 +29,10 @@ data class MonitoringUiState(
     val cartReferenceReady: Boolean = false,
     val referenceCaptureRequest: Long = 0,
     val cartReferenceCaptureRequest: Long = 0,
+    val additionalZones: List<MonitoredZoneUiState> = emptyList(),
     val areaSetupActive: Boolean = false,
     val areaSetupTarget: AreaSetupTarget = AreaSetupTarget.Table,
+    val areaSetupZoneId: String? = null,
     val draftZoneBounds: NormalizedRect = DefaultPackingZone.bounds,
     val cartPresent: Boolean = false,
     val awaitingFeedbackEventId: String? = null,
@@ -40,7 +42,16 @@ data class MonitoringUiState(
 enum class AreaSetupTarget {
     Table,
     Cart,
+    Additional,
 }
+
+data class MonitoredZoneUiState(
+    val zone: MonitoringZone,
+    val snapshot: MonitoringSnapshot = MonitoringSnapshot.initial(zone.id, 0),
+    val referenceReady: Boolean = false,
+    val referenceCaptureRequest: Long = 0,
+    val present: Boolean = zone.type != ZoneType.Tote,
+)
 
 val DefaultPackingZone = MonitoringZone(
     id = "packing-table",

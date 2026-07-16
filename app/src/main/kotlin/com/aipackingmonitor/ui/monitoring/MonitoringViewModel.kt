@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.aipackingmonitor.data.AlertEventEntity
 import com.aipackingmonitor.data.AlertEventRepository
+import com.aipackingmonitor.data.ConfiguredMonitoringZone
 import com.aipackingmonitor.data.PilotSettings
 import com.aipackingmonitor.data.SettingsRepository
 import com.aipackingmonitor.device.AlertController
@@ -14,6 +15,7 @@ import com.aipackingmonitor.domain.model.MonitoringSnapshot
 import com.aipackingmonitor.domain.model.MonitoringState
 import com.aipackingmonitor.domain.model.MonitoringZone
 import com.aipackingmonitor.domain.model.NormalizedRect
+import com.aipackingmonitor.domain.model.ZoneType
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.util.Locale
 import java.util.UUID
@@ -50,6 +52,7 @@ class MonitoringViewModel @Inject constructor(
                     val normalized = settings.normalized()
                     val savedBounds = normalized.zoneBounds()
                     val savedCartBounds = normalized.cartZoneBounds()
+                    val savedAdditionalZones = normalized.toAdditionalZoneStates(current.additionalZones)
                     current.copy(
                         settings = normalized,
                         zone = current.zone.copy(
@@ -62,12 +65,17 @@ class MonitoringViewModel @Inject constructor(
                             occupancyThreshold = normalized.entryThreshold,
                             clearThreshold = normalized.clearThreshold,
                         ),
+                        additionalZones = savedAdditionalZones,
                         draftZoneBounds = if (current.areaSetupActive) {
                             current.draftZoneBounds
                         } else {
                             when (current.areaSetupTarget) {
                                 AreaSetupTarget.Table -> savedBounds
                                 AreaSetupTarget.Cart -> savedCartBounds
+                                AreaSetupTarget.Additional ->
+                                    savedAdditionalZones.firstOrNull {
+                                        it.zone.id == current.areaSetupZoneId
+                                    }?.zone?.bounds ?: savedBounds
                             }
                         },
                     )
@@ -122,42 +130,91 @@ class MonitoringViewModel @Inject constructor(
         }
     }
 
-    fun onReferenceCaptureResult(success: Boolean) {
-        val now = now()
-        _uiState.update { current ->
-            if (success) {
-                current.copy(
-                    snapshot = stateMachine.onReferenceCaptured(current.snapshot, now),
-                    referenceReady = true,
-                    monitoringEnabled = true,
-                    lastMessage = "Empty reference captured. Monitoring is active.",
-                )
-            } else {
-                current.copy(
-                    referenceReady = false,
-                    monitoringEnabled = false,
-                    lastMessage = "Reference capture failed. Improve lighting and try again.",
-                )
-            }
+    fun requestAdditionalReferenceCapture(zoneId: String) {
+        val current = _uiState.value
+        val zoneState = current.additionalZones.firstOrNull { it.zone.id == zoneId } ?: return
+        if (!current.cameraPermissionGranted) {
+            _uiState.update { it.copy(lastMessage = "Camera permission is required.") }
+            return
+        }
+        _uiState.update {
+            it.copy(
+                additionalZones = it.additionalZones.map { state ->
+                    if (state.zone.id == zoneId) {
+                        state.copy(referenceCaptureRequest = state.referenceCaptureRequest + 1)
+                    } else {
+                        state
+                    }
+                },
+                lastMessage = "Hold ${zoneState.zone.name.lowercase(Locale.US)} empty. Capturing the next stable frame.",
+            )
         }
     }
 
-    fun onCartReferenceCaptureResult(success: Boolean) {
+    fun onReferenceCaptureResult(zoneId: String, success: Boolean) {
         val now = now()
         _uiState.update { current ->
-            if (success) {
-                current.copy(
-                    cartSnapshot = stateMachine.onReferenceCaptured(current.cartSnapshot, now),
-                    cartReferenceReady = true,
-                    cartPresent = true,
-                    lastMessage = "Empty cart reference captured. Cart monitoring will run when the cart is parked.",
-                )
-            } else {
-                current.copy(
-                    cartReferenceReady = false,
-                    cartPresent = false,
-                    lastMessage = "Cart reference capture failed. Park the empty cart clearly and try again.",
-                )
+            when (zoneId) {
+                current.zone.id -> {
+                    if (success) {
+                        current.copy(
+                            snapshot = stateMachine.onReferenceCaptured(current.snapshot, now),
+                            referenceReady = true,
+                            monitoringEnabled = true,
+                            lastMessage = "Empty reference captured. Monitoring is active.",
+                        )
+                    } else {
+                        current.copy(
+                            referenceReady = false,
+                            monitoringEnabled = false,
+                            lastMessage = "Reference capture failed. Improve lighting and try again.",
+                        )
+                    }
+                }
+
+                current.cartZone.id -> {
+                    if (success) {
+                        current.copy(
+                            cartSnapshot = stateMachine.onReferenceCaptured(current.cartSnapshot, now),
+                            cartReferenceReady = true,
+                            cartPresent = true,
+                            lastMessage = "Empty cart reference captured. Cart monitoring will run when the cart is parked.",
+                        )
+                    } else {
+                        current.copy(
+                            cartReferenceReady = false,
+                            cartPresent = false,
+                            lastMessage = "Cart reference capture failed. Park the empty cart clearly and try again.",
+                        )
+                    }
+                }
+
+                else -> {
+                    val zoneState = current.additionalZones.firstOrNull { it.zone.id == zoneId }
+                        ?: return@update current
+                    current.copy(
+                        additionalZones = current.additionalZones.map { state ->
+                            if (state.zone.id == zoneId) {
+                                state.copy(
+                                    snapshot = if (success) {
+                                        stateMachine.onReferenceCaptured(state.snapshot, now)
+                                    } else {
+                                        MonitoringSnapshot.initial(state.zone.id, now)
+                                    },
+                                    referenceReady = success,
+                                    present = success || state.zone.type != ZoneType.Tote,
+                                )
+                            } else {
+                                state
+                            }
+                        },
+                        lastMessage = if (success) {
+                            "Empty reference captured for ${zoneState.zone.name}."
+                        } else {
+                            "Reference capture failed for ${zoneState.zone.name}. Improve lighting and try again."
+                        },
+                    )
+                }
             }
         }
     }
@@ -192,7 +249,28 @@ class MonitoringViewModel @Inject constructor(
                     }
                 }
 
-                else -> current
+                else -> {
+                    val zoneState = current.additionalZones.firstOrNull { it.zone.id == zoneId }
+                        ?: return@update current
+                    if (zoneState.referenceReady) {
+                        current
+                    } else {
+                        current.copy(
+                            additionalZones = current.additionalZones.map { state ->
+                                if (state.zone.id == zoneId) {
+                                    state.copy(
+                                        snapshot = stateMachine.onReferenceCaptured(state.snapshot, now),
+                                        referenceReady = true,
+                                        present = state.zone.type != ZoneType.Tote || state.present,
+                                    )
+                                } else {
+                                    state
+                                }
+                            },
+                            lastMessage = "Saved reference loaded for ${zoneState.zone.name}.",
+                        )
+                    }
+                }
             }
         }
     }
@@ -211,6 +289,11 @@ class MonitoringViewModel @Inject constructor(
                     monitoringEnabled = false,
                     snapshot = stateMachine.onPaused(it.snapshot, now),
                     cartSnapshot = stateMachine.onPaused(it.cartSnapshot, now),
+                    additionalZones = it.additionalZones.map { zoneState ->
+                        zoneState.copy(
+                            snapshot = stateMachine.onPaused(zoneState.snapshot, now),
+                        )
+                    },
                     lastMessage = "Monitoring paused.",
                 )
             }
@@ -231,6 +314,15 @@ class MonitoringViewModel @Inject constructor(
                 } else {
                     it.cartSnapshot
                 },
+                additionalZones = it.additionalZones.map { zoneState ->
+                    if (zoneState.referenceReady) {
+                        zoneState.copy(
+                            snapshot = stateMachine.onReferenceCaptured(zoneState.snapshot, now),
+                        )
+                    } else {
+                        zoneState
+                    }
+                },
                 lastMessage = "Monitoring resumed.",
             )
         }
@@ -243,6 +335,7 @@ class MonitoringViewModel @Inject constructor(
         when (result.zoneId) {
             current.zone.id -> onTableDetection(current, result)
             current.cartZone.id -> onCartDetection(current, result)
+            else -> onAdditionalDetection(current, result)
         }
     }
 
@@ -297,6 +390,50 @@ class MonitoringViewModel @Inject constructor(
         handleTransition(current.cartSnapshot, next, current.cartZone, current.settings, now)
     }
 
+    private fun onAdditionalDetection(current: MonitoringUiState, result: DetectionResult) {
+        val zoneState = current.additionalZones.firstOrNull { it.zone.id == result.zoneId } ?: return
+        if (!zoneState.referenceReady) return
+
+        val now = now()
+        val cartAway = zoneState.zone.type == ZoneType.Tote && isCartAway(result)
+        val next = if (cartAway) {
+            cartAwaySnapshot(
+                previous = zoneState.snapshot,
+                detection = result,
+                nowMillis = now,
+            )
+        } else {
+            stateMachine.reduce(
+                previous = zoneState.snapshot,
+                zone = zoneState.zone,
+                detection = result,
+                nowMillis = now,
+                policyOverride = current.settings.toPolicy(),
+            )
+        }
+
+        _uiState.update {
+            it.copy(
+                additionalZones = it.additionalZones.map { state ->
+                    if (state.zone.id == result.zoneId) {
+                        state.copy(
+                            snapshot = next,
+                            present = !cartAway,
+                        )
+                    } else {
+                        state
+                    }
+                },
+                lastMessage = if (cartAway) {
+                    "${zoneState.zone.name} is away or not parked in its reference position. Zone ignored."
+                } else {
+                    next.alertMessage
+                },
+            )
+        }
+        handleTransition(zoneState.snapshot, next, zoneState.zone, current.settings, now)
+    }
+
     fun dismissAlert() {
         val current = _uiState.value
         val eventId = activeEventIds.values.firstOrNull()
@@ -305,6 +442,11 @@ class MonitoringViewModel @Inject constructor(
             it.copy(
                 snapshot = stateMachine.dismissAlert(current.snapshot, now()),
                 cartSnapshot = stateMachine.dismissAlert(current.cartSnapshot, now()),
+                additionalZones = current.additionalZones.map { zoneState ->
+                    zoneState.copy(
+                        snapshot = stateMachine.dismissAlert(zoneState.snapshot, now()),
+                    )
+                },
                 awaitingFeedbackEventId = eventId,
                 lastMessage = "Alert dismissed. Mark whether it was correct.",
             )
@@ -344,16 +486,85 @@ class MonitoringViewModel @Inject constructor(
         viewModelScope.launch { settingsRepository.updateVibrationEnabled(enabled) }
     }
 
+    fun addAdditionalTableZone() {
+        addAdditionalZone(ZoneType.PackingTable)
+    }
+
+    fun addAdditionalCartZone() {
+        addAdditionalZone(ZoneType.Tote)
+    }
+
+    fun removeAdditionalZone(zoneId: String) {
+        val current = _uiState.value
+        val zoneState = current.additionalZones.firstOrNull { it.zone.id == zoneId } ?: return
+        stopActiveAlert(zoneId, now(), dismissed = true, markedCorrect = null)
+        viewModelScope.launch {
+            settingsRepository.removeAdditionalZone(zoneId)
+            _uiState.update {
+                it.copy(
+                    additionalZones = it.additionalZones.filterNot { state -> state.zone.id == zoneId },
+                    areaSetupActive = if (it.areaSetupZoneId == zoneId) false else it.areaSetupActive,
+                    areaSetupZoneId = if (it.areaSetupZoneId == zoneId) null else it.areaSetupZoneId,
+                    lastMessage = "${zoneState.zone.name} removed.",
+                )
+            }
+        }
+    }
+
+    private fun addAdditionalZone(type: ZoneType) {
+        val current = _uiState.value
+        if (current.additionalZones.size >= MAX_ADDITIONAL_ZONES) {
+            _uiState.update {
+                it.copy(lastMessage = "Maximum of $MAX_ADDITIONAL_ZONES additional zones reached.")
+            }
+            return
+        }
+
+        val sameTypeCount = current.additionalZones.count { it.zone.type == type } + 1
+        val name = when (type) {
+            ZoneType.PackingTable -> "Packing table ${sameTypeCount + 1}"
+            ZoneType.Tote -> "Cart ${sameTypeCount + 1}"
+            ZoneType.DispatchShelf -> "Zone ${sameTypeCount + 1}"
+        }
+        val sourceBounds = when (type) {
+            ZoneType.PackingTable -> current.zone.bounds
+            ZoneType.Tote -> current.cartZone.bounds
+            ZoneType.DispatchShelf -> current.zone.bounds
+        }
+        val zone = ConfiguredMonitoringZone(
+            id = "${type.name.lowercase(Locale.US)}-${UUID.randomUUID().toString().take(8)}",
+            name = name,
+            type = type,
+            left = sourceBounds.left,
+            top = sourceBounds.top,
+            right = sourceBounds.right,
+            bottom = sourceBounds.bottom,
+        )
+
+        viewModelScope.launch {
+            settingsRepository.addAdditionalZone(zone)
+            _uiState.update {
+                it.copy(lastMessage = "$name added. Set its area and capture an empty reference.")
+            }
+        }
+    }
+
     fun startAreaSetup() {
         val current = _uiState.value
         _uiState.update {
             it.copy(
                 areaSetupActive = true,
                 areaSetupTarget = AreaSetupTarget.Table,
+                areaSetupZoneId = current.zone.id,
                 monitoringEnabled = false,
                 draftZoneBounds = current.zone.bounds,
                 snapshot = stateMachine.onPaused(current.snapshot, now()),
                 cartSnapshot = stateMachine.onPaused(current.cartSnapshot, now()),
+                additionalZones = current.additionalZones.map { zoneState ->
+                    zoneState.copy(
+                        snapshot = stateMachine.onPaused(zoneState.snapshot, now()),
+                    )
+                },
                 lastMessage = "Adjust the crop to cover only the packing table, then save.",
             )
         }
@@ -365,11 +576,39 @@ class MonitoringViewModel @Inject constructor(
             it.copy(
                 areaSetupActive = true,
                 areaSetupTarget = AreaSetupTarget.Cart,
+                areaSetupZoneId = current.cartZone.id,
                 monitoringEnabled = false,
                 draftZoneBounds = current.cartZone.bounds,
                 snapshot = stateMachine.onPaused(current.snapshot, now()),
                 cartSnapshot = stateMachine.onPaused(current.cartSnapshot, now()),
+                additionalZones = current.additionalZones.map { zoneState ->
+                    zoneState.copy(
+                        snapshot = stateMachine.onPaused(zoneState.snapshot, now()),
+                    )
+                },
                 lastMessage = "Adjust the crop to cover the parked cart baskets, then save.",
+            )
+        }
+    }
+
+    fun startAdditionalAreaSetup(zoneId: String) {
+        val current = _uiState.value
+        val zoneState = current.additionalZones.firstOrNull { it.zone.id == zoneId } ?: return
+        _uiState.update {
+            it.copy(
+                areaSetupActive = true,
+                areaSetupTarget = AreaSetupTarget.Additional,
+                areaSetupZoneId = zoneId,
+                monitoringEnabled = false,
+                draftZoneBounds = zoneState.zone.bounds,
+                snapshot = stateMachine.onPaused(current.snapshot, now()),
+                cartSnapshot = stateMachine.onPaused(current.cartSnapshot, now()),
+                additionalZones = current.additionalZones.map { state ->
+                    state.copy(
+                        snapshot = stateMachine.onPaused(state.snapshot, now()),
+                    )
+                },
+                lastMessage = "Adjust the crop for ${zoneState.zone.name}, then save.",
             )
         }
     }
@@ -378,9 +617,14 @@ class MonitoringViewModel @Inject constructor(
         _uiState.update {
             it.copy(
                 areaSetupActive = false,
+                areaSetupZoneId = null,
                 draftZoneBounds = when (it.areaSetupTarget) {
                     AreaSetupTarget.Table -> it.zone.bounds
                     AreaSetupTarget.Cart -> it.cartZone.bounds
+                    AreaSetupTarget.Additional ->
+                        it.additionalZones.firstOrNull { zoneState ->
+                            zoneState.zone.id == it.areaSetupZoneId
+                        }?.zone?.bounds ?: it.zone.bounds
                 },
                 lastMessage = "Area setup cancelled.",
             )
@@ -394,6 +638,7 @@ class MonitoringViewModel @Inject constructor(
                 lastMessage = when (it.areaSetupTarget) {
                     AreaSetupTarget.Table -> "Adjust the crop to cover only the packing table, then save."
                     AreaSetupTarget.Cart -> "Adjust the crop to cover the parked cart baskets, then save."
+                    AreaSetupTarget.Additional -> "Adjust the crop for the selected zone, then save."
                 },
             )
         }
@@ -403,6 +648,7 @@ class MonitoringViewModel @Inject constructor(
         val current = _uiState.value
         val bounds = current.draftZoneBounds
         val target = current.areaSetupTarget
+        val targetZoneId = current.areaSetupZoneId
         viewModelScope.launch {
             when (target) {
                 AreaSetupTarget.Table -> settingsRepository.updateZoneBounds(
@@ -418,12 +664,25 @@ class MonitoringViewModel @Inject constructor(
                     right = bounds.right,
                     bottom = bounds.bottom,
                 )
+
+                AreaSetupTarget.Additional -> {
+                    if (targetZoneId != null) {
+                        settingsRepository.updateAdditionalZoneBounds(
+                            zoneId = targetZoneId,
+                            left = bounds.left,
+                            top = bounds.top,
+                            right = bounds.right,
+                            bottom = bounds.bottom,
+                        )
+                    }
+                }
             }
             val now = now()
             _uiState.update {
                 when (target) {
                     AreaSetupTarget.Table -> it.copy(
                         areaSetupActive = false,
+                        areaSetupZoneId = null,
                         referenceReady = false,
                         monitoringEnabled = false,
                         zone = it.zone.copy(bounds = bounds),
@@ -433,6 +692,7 @@ class MonitoringViewModel @Inject constructor(
 
                     AreaSetupTarget.Cart -> it.copy(
                         areaSetupActive = false,
+                        areaSetupZoneId = null,
                         cartReferenceReady = false,
                         monitoringEnabled = false,
                         cartPresent = false,
@@ -440,6 +700,30 @@ class MonitoringViewModel @Inject constructor(
                         cartSnapshot = MonitoringSnapshot.initial(it.cartZone.id, now),
                         lastMessage = "Cart area saved. Capture a new empty cart reference with the cart parked.",
                     )
+
+                    AreaSetupTarget.Additional -> {
+                        val zoneState = it.additionalZones.firstOrNull { state ->
+                            state.zone.id == targetZoneId
+                        }
+                        it.copy(
+                            areaSetupActive = false,
+                            areaSetupZoneId = null,
+                            monitoringEnabled = false,
+                            additionalZones = it.additionalZones.map { state ->
+                                if (state.zone.id == targetZoneId) {
+                                    state.copy(
+                                        zone = state.zone.copy(bounds = bounds),
+                                        snapshot = MonitoringSnapshot.initial(state.zone.id, now),
+                                        referenceReady = false,
+                                        present = state.zone.type != ZoneType.Tote,
+                                    )
+                                } else {
+                                    state
+                                }
+                            },
+                            lastMessage = "${zoneState?.zone?.name ?: "Zone"} area saved. Capture a new empty reference.",
+                        )
+                    }
                 }
             }
         }
@@ -597,6 +881,9 @@ class MonitoringViewModel @Inject constructor(
             cartZoneTop = cartTop,
             cartZoneRight = cartRight,
             cartZoneBottom = cartBottom,
+            additionalZones = additionalZones
+                .map { it.normalizedAdditionalZone() }
+                .take(MAX_ADDITIONAL_ZONES),
         )
     }
 
@@ -614,6 +901,40 @@ class MonitoringViewModel @Inject constructor(
         val right = cartZoneRight.coerceIn(left + MIN_ZONE_SIZE, 1f)
         val bottom = cartZoneBottom.coerceIn(top + MIN_ZONE_SIZE, 1f)
         return NormalizedRect(left, top, right, bottom)
+    }
+
+    private fun PilotSettings.toAdditionalZoneStates(
+        existing: List<MonitoredZoneUiState>,
+    ): List<MonitoredZoneUiState> =
+        additionalZones.take(MAX_ADDITIONAL_ZONES).map { configuredZone ->
+            val zone = configuredZone.normalizedAdditionalZone().toMonitoringZone(
+                occupancyThreshold = entryThreshold,
+                clearThreshold = clearThreshold,
+            )
+            val existingState = existing.firstOrNull { it.zone.id == zone.id }
+            if (existingState != null) {
+                existingState.copy(zone = zone)
+            } else {
+                MonitoredZoneUiState(
+                    zone = zone,
+                    snapshot = MonitoringSnapshot.initial(zone.id, 0),
+                    referenceReady = false,
+                    present = zone.type != ZoneType.Tote,
+                )
+            }
+        }
+
+    private fun ConfiguredMonitoringZone.normalizedAdditionalZone(): ConfiguredMonitoringZone {
+        val left = left.coerceIn(0f, 1f - MIN_ZONE_SIZE)
+        val top = top.coerceIn(0f, 1f - MIN_ZONE_SIZE)
+        val right = right.coerceIn(left + MIN_ZONE_SIZE, 1f)
+        val bottom = bottom.coerceIn(top + MIN_ZONE_SIZE, 1f)
+        return copy(
+            left = left,
+            top = top,
+            right = right,
+            bottom = bottom,
+        )
     }
 
     private fun PilotSettings.toPolicy(): ClearancePolicy {
@@ -691,6 +1012,7 @@ class MonitoringViewModel @Inject constructor(
 
     private companion object {
         const val MIN_ZONE_SIZE = 0.06f
+        const val MAX_ADDITIONAL_ZONES = 4
         const val CART_AWAY_OCCUPANCY_THRESHOLD = 0.35f
         const val CART_AWAY_REGION_THRESHOLD = 0.28f
     }
