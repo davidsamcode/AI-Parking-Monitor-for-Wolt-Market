@@ -54,6 +54,10 @@ data class DetectionResult(
     val occupancyScore: Float,
     val motionScore: Float,
     val largestChangedRegionScore: Float,
+    val addedObjectScore: Float = 0f,
+    val removedObjectScore: Float = 0f,
+    val localVerifierConfidence: Float = 0f,
+    val changeClassification: ChangeClassification = ChangeClassification.None,
     val isMotionStable: Boolean,
     val quality: DetectionQuality,
     val analysisLatencyMs: Long,
@@ -65,6 +69,9 @@ data class DetectionResult(
         require(largestChangedRegionScore in 0f..1f) {
             "largestChangedRegionScore must be in 0..1"
         }
+        require(addedObjectScore in 0f..1f) { "addedObjectScore must be in 0..1" }
+        require(removedObjectScore in 0f..1f) { "removedObjectScore must be in 0..1" }
+        require(localVerifierConfidence in 0f..1f) { "localVerifierConfidence must be in 0..1" }
         require(analysisLatencyMs >= 0) { "analysisLatencyMs must be non-negative" }
     }
 
@@ -72,6 +79,14 @@ data class DetectionResult(
 
     companion object {
     }
+}
+
+enum class ChangeClassification {
+    None,
+    AddedObject,
+    RemovedReferenceObject,
+    LightingChange,
+    MixedChange,
 }
 
 enum class MonitoringState {
@@ -118,6 +133,10 @@ data class MonitoringSnapshot(
     val occupancyScore: Float,
     val motionScore: Float,
     val largestChangedRegionScore: Float,
+    val addedObjectScore: Float,
+    val removedObjectScore: Float,
+    val localVerifierConfidence: Float,
+    val changeClassification: ChangeClassification,
     val changedRegionBounds: NormalizedRect?,
     val stateChangedAtMillis: Long,
     val packingStartedAtMillis: Long?,
@@ -137,6 +156,10 @@ data class MonitoringSnapshot(
                 occupancyScore = 0f,
                 motionScore = 0f,
                 largestChangedRegionScore = 0f,
+                addedObjectScore = 0f,
+                removedObjectScore = 0f,
+                localVerifierConfidence = 0f,
+                changeClassification = ChangeClassification.None,
                 changedRegionBounds = null,
                 stateChangedAtMillis = nowMillis,
                 packingStartedAtMillis = null,

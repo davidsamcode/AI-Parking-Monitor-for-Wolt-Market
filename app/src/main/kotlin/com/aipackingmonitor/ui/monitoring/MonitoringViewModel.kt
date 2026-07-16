@@ -498,6 +498,10 @@ class MonitoringViewModel @Inject constructor(
                     triggerReason = alertReason(zone, snapshot, policy),
                     motionScore = snapshot.motionScore,
                     largestChangedRegionScore = snapshot.largestChangedRegionScore,
+                    addedObjectScore = snapshot.addedObjectScore,
+                    removedObjectScore = snapshot.removedObjectScore,
+                    localVerifierDecision = snapshot.changeClassification.name,
+                    localVerifierConfidence = snapshot.localVerifierConfidence,
                     clearThreshold = policy.exitThreshold,
                     leftoverThreshold = policy.leftoverThreshold,
                     changedRegionLeft = changedRegion?.left,
@@ -636,6 +640,13 @@ class MonitoringViewModel @Inject constructor(
             policy.leftoverThreshold * 100f,
             snapshot.largestChangedRegionScore * 100f,
             snapshot.motionScore * 100f,
+        ) + String.format(
+            Locale.US,
+            " Local verifier: %s %.0f%% confidence, added %.0f%%, removed %.0f%%.",
+            snapshot.changeClassification.name,
+            snapshot.localVerifierConfidence * 100f,
+            snapshot.addedObjectScore * 100f,
+            snapshot.removedObjectScore * 100f,
         )
 
     private fun isCartAway(detection: DetectionResult): Boolean =
@@ -656,6 +667,10 @@ class MonitoringViewModel @Inject constructor(
             occupancyScore = detection.occupancyScore,
             motionScore = detection.motionScore,
             largestChangedRegionScore = detection.largestChangedRegionScore,
+            addedObjectScore = detection.addedObjectScore,
+            removedObjectScore = detection.removedObjectScore,
+            localVerifierConfidence = detection.localVerifierConfidence,
+            changeClassification = detection.changeClassification,
             changedRegionBounds = detection.changedRegionBounds,
             stateChangedAtMillis = if (previous.state == MonitoringState.SystemUnavailable) {
                 previous.stateChangedAtMillis

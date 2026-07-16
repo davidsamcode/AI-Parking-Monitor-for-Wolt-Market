@@ -1,6 +1,7 @@
 package com.aipackingmonitor.domain
 
 import com.aipackingmonitor.domain.model.ClearancePolicy
+import com.aipackingmonitor.domain.model.ChangeClassification
 import com.aipackingmonitor.domain.model.DetectionQuality
 import com.aipackingmonitor.domain.model.DetectionResult
 import com.aipackingmonitor.domain.model.MonitoringSnapshot
@@ -171,6 +172,33 @@ class MonitoringStateMachineTest {
     }
 
     @Test
+    fun `post pack scan ignores removed reference objects`() {
+        val scanning = postPackScanAt(5_000)
+
+        val clear = stateMachine.reduce(
+            previous = scanning,
+            zone = zone,
+            detection = detection(
+                score = 0.12f,
+                motion = 0.01f,
+                largestRegion = 0.08f,
+                classification = ChangeClassification.RemovedReferenceObject,
+                verifierConfidence = 0.9f,
+                addedObjectScore = 0.1f,
+                removedObjectScore = 0.8f,
+            ),
+            nowMillis = 6_100,
+        )
+
+        assertEquals(MonitoringState.ClearReset, clear.state)
+        assertEquals(null, clear.alertStartedAtMillis)
+        assertEquals(
+            "Change ignored: local verifier says a reference object was removed.",
+            clear.alertMessage,
+        )
+    }
+
+    @Test
     fun `movement during scan returns to packing active`() {
         val scanning = postPackScanAt(5_000)
 
@@ -235,12 +263,20 @@ class MonitoringStateMachineTest {
         quality: DetectionQuality = DetectionQuality.Valid,
         stable: Boolean = true,
         changedRegion: NormalizedRect? = null,
+        classification: ChangeClassification = ChangeClassification.AddedObject,
+        verifierConfidence: Float = 0.8f,
+        addedObjectScore: Float = 0.7f,
+        removedObjectScore: Float = 0.1f,
     ): DetectionResult =
         DetectionResult(
             zoneId = zone.id,
             occupancyScore = score,
             motionScore = motion,
             largestChangedRegionScore = largestRegion,
+            addedObjectScore = addedObjectScore,
+            removedObjectScore = removedObjectScore,
+            localVerifierConfidence = verifierConfidence,
+            changeClassification = classification,
             isMotionStable = stable,
             quality = quality,
             analysisLatencyMs = 12,

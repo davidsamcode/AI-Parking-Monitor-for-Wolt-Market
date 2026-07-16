@@ -1,6 +1,7 @@
 package com.aipackingmonitor.domain
 
 import com.aipackingmonitor.domain.model.ClearancePolicy
+import com.aipackingmonitor.domain.model.ChangeClassification
 import com.aipackingmonitor.domain.model.DetectionQuality
 import com.aipackingmonitor.domain.model.DetectionResult
 import com.aipackingmonitor.domain.model.MonitoringSnapshot
@@ -86,6 +87,10 @@ class MonitoringStateMachine(
                 occupancyScore = detection.occupancyScore,
                 motionScore = detection.motionScore,
                 largestChangedRegionScore = detection.largestChangedRegionScore,
+                addedObjectScore = detection.addedObjectScore,
+                removedObjectScore = detection.removedObjectScore,
+                localVerifierConfidence = detection.localVerifierConfidence,
+                changeClassification = detection.changeClassification,
                 changedRegionBounds = detection.changedRegionBounds,
                 lastQuality = detection.quality,
                 alertMessage = "Capture an empty reference before monitoring.",
@@ -279,7 +284,7 @@ class MonitoringStateMachine(
                 clearSinceMillis = null,
                 alertStartedAtMillis = nowMillis,
                 dismissed = false,
-                message = "Possible leftover item after packing. Please check.",
+                message = "Possible leftover item after packing. Rules and local verifier agree.",
             )
         } else {
             previous.transitionTo(
@@ -292,7 +297,7 @@ class MonitoringStateMachine(
                 clearSinceMillis = nowMillis,
                 alertStartedAtMillis = null,
                 dismissed = false,
-                message = "Table matches the empty reference. Ready for next packing.",
+                message = clearOrVerifierMessage(detection, policy),
             )
         }
     }
@@ -355,7 +360,28 @@ class MonitoringStateMachine(
         detection.isMotionStable && detection.occupancyScore <= policy.exitThreshold
 
     private fun isLeftoverPresent(detection: DetectionResult, policy: ClearancePolicy): Boolean =
-        detection.isMotionStable && detection.occupancyScore >= policy.leftoverThreshold
+        detection.isMotionStable &&
+            detection.occupancyScore >= policy.leftoverThreshold &&
+            detection.changeClassification == ChangeClassification.AddedObject &&
+            detection.localVerifierConfidence >= LOCAL_VERIFIER_CONFIDENCE_THRESHOLD
+
+    private fun clearOrVerifierMessage(detection: DetectionResult, policy: ClearancePolicy): String =
+        if (detection.occupancyScore >= policy.leftoverThreshold) {
+            when (detection.changeClassification) {
+                ChangeClassification.RemovedReferenceObject ->
+                    "Change ignored: local verifier says a reference object was removed."
+                ChangeClassification.LightingChange ->
+                    "Change ignored: local verifier says this looks like lighting or shadow."
+                ChangeClassification.MixedChange ->
+                    "Change ignored: local verifier could not confirm an added object."
+                ChangeClassification.None ->
+                    "Change ignored: local verifier found no added object."
+                ChangeClassification.AddedObject ->
+                    "Change ignored: local verifier confidence is too low."
+            }
+        } else {
+            "Table matches the empty reference. Ready for next packing."
+        }
 
     private fun unavailable(
         previous: MonitoringSnapshot,
@@ -393,6 +419,10 @@ class MonitoringStateMachine(
             occupancyScore = detection.occupancyScore,
             motionScore = detection.motionScore,
             largestChangedRegionScore = detection.largestChangedRegionScore,
+            addedObjectScore = detection.addedObjectScore,
+            removedObjectScore = detection.removedObjectScore,
+            localVerifierConfidence = detection.localVerifierConfidence,
+            changeClassification = detection.changeClassification,
             changedRegionBounds = detection.changedRegionBounds,
             stateChangedAtMillis = if (this.state == state) stateChangedAtMillis else nowMillis,
             packingStartedAtMillis = packingStartedAtMillis,
@@ -416,6 +446,10 @@ class MonitoringStateMachine(
             occupancyScore = detection.occupancyScore,
             motionScore = detection.motionScore,
             largestChangedRegionScore = detection.largestChangedRegionScore,
+            addedObjectScore = detection.addedObjectScore,
+            removedObjectScore = detection.removedObjectScore,
+            localVerifierConfidence = detection.localVerifierConfidence,
+            changeClassification = detection.changeClassification,
             changedRegionBounds = detection.changedRegionBounds,
             quietSinceMillis = quietSinceMillis,
             scanStartedAtMillis = scanStartedAtMillis,
@@ -430,6 +464,10 @@ class MonitoringStateMachine(
             occupancyScore = occupancyScore,
             motionScore = motionScore,
             largestChangedRegionScore = largestChangedRegionScore,
+            addedObjectScore = addedObjectScore,
+            removedObjectScore = removedObjectScore,
+            localVerifierConfidence = localVerifierConfidence,
+            changeClassification = changeClassification,
             changedRegionBounds = changedRegionBounds,
             isMotionStable = motionScore < MOTION_STABLE_THRESHOLD,
             quality = lastQuality,
@@ -453,6 +491,10 @@ class MonitoringStateMachine(
             occupancyScore = 0f,
             motionScore = 0f,
             largestChangedRegionScore = 0f,
+            addedObjectScore = 0f,
+            removedObjectScore = 0f,
+            localVerifierConfidence = 0f,
+            changeClassification = ChangeClassification.None,
             changedRegionBounds = null,
             isMotionStable = true,
             quality = DetectionQuality.Valid,
@@ -462,5 +504,6 @@ class MonitoringStateMachine(
     private companion object {
         const val MOTION_STABLE_THRESHOLD = 0.045f
         const val MOTION_ACTIVITY_THRESHOLD = 0.055f
+        const val LOCAL_VERIFIER_CONFIDENCE_THRESHOLD = 0.55f
     }
 }

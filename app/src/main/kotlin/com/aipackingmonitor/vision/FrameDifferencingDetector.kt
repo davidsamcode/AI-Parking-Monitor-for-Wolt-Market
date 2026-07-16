@@ -5,6 +5,7 @@ import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.YuvImage
 import androidx.camera.core.ImageProxy
+import com.aipackingmonitor.domain.model.ChangeClassification
 import com.aipackingmonitor.domain.model.DetectionQuality
 import com.aipackingmonitor.domain.model.DetectionResult
 import com.aipackingmonitor.domain.model.MonitoringZone
@@ -57,6 +58,10 @@ class FrameDifferencingDetector(context: Context) {
                 occupancy = 0f,
                 motion = 0f,
                 largestChangedRegion = 0f,
+                addedObjectScore = 0f,
+                removedObjectScore = 0f,
+                localVerifierConfidence = 0f,
+                changeClassification = ChangeClassification.None,
                 changedRegionBounds = null,
                 stable = false,
                 quality = DetectionQuality.NoReference,
@@ -69,6 +74,10 @@ class FrameDifferencingDetector(context: Context) {
                 occupancy = 0f,
                 motion = 0f,
                 largestChangedRegion = 0f,
+                addedObjectScore = 0f,
+                removedObjectScore = 0f,
+                localVerifierConfidence = 0f,
+                changeClassification = ChangeClassification.None,
                 changedRegionBounds = null,
                 stable = false,
                 quality = DetectionQuality.NoReference,
@@ -83,6 +92,10 @@ class FrameDifferencingDetector(context: Context) {
                 occupancy = 0f,
                 motion = 0f,
                 largestChangedRegion = 0f,
+                addedObjectScore = 0f,
+                removedObjectScore = 0f,
+                localVerifierConfidence = 0f,
+                changeClassification = ChangeClassification.None,
                 changedRegionBounds = null,
                 stable = false,
                 quality = current.quality,
@@ -119,6 +132,10 @@ class FrameDifferencingDetector(context: Context) {
             occupancy = occupancy,
             motion = motionScore,
             largestChangedRegion = largestChangedRegion.score,
+            addedObjectScore = largestChangedRegion.addedObjectScore,
+            removedObjectScore = largestChangedRegion.removedObjectScore,
+            localVerifierConfidence = largestChangedRegion.confidence,
+            changeClassification = largestChangedRegion.classification,
             changedRegionBounds = largestChangedRegion.bounds,
             stable = motionScore < 0.045f,
             quality = quality,
@@ -175,6 +192,10 @@ class FrameDifferencingDetector(context: Context) {
         occupancy: Float,
         motion: Float,
         largestChangedRegion: Float,
+        addedObjectScore: Float,
+        removedObjectScore: Float,
+        localVerifierConfidence: Float,
+        changeClassification: ChangeClassification,
         changedRegionBounds: NormalizedRect?,
         stable: Boolean,
         quality: DetectionQuality,
@@ -185,6 +206,10 @@ class FrameDifferencingDetector(context: Context) {
             occupancyScore = occupancy.coerceIn(0f, 1f),
             motionScore = motion.coerceIn(0f, 1f),
             largestChangedRegionScore = largestChangedRegion.coerceIn(0f, 1f),
+            addedObjectScore = addedObjectScore.coerceIn(0f, 1f),
+            removedObjectScore = removedObjectScore.coerceIn(0f, 1f),
+            localVerifierConfidence = localVerifierConfidence.coerceIn(0f, 1f),
+            changeClassification = changeClassification,
             isMotionStable = stable,
             quality = quality,
             analysisLatencyMs = (System.nanoTime() - startedNanos) / 1_000_000,
@@ -205,6 +230,9 @@ class FrameDifferencingDetector(context: Context) {
         var largestMinY = 0
         var largestMaxX = 0
         var largestMaxY = 0
+        var largestDarker = 0
+        var largestBrighter = 0
+        var largestRegionIndices = IntArray(0)
 
         for (index in changed.indices) {
             if (!changed[index] || visited[index]) continue
@@ -215,12 +243,16 @@ class FrameDifferencingDetector(context: Context) {
             var minY = GRID_HEIGHT
             var maxX = 0
             var maxY = 0
+            var darker = 0
+            var brighter = 0
             val stack = IntArray(changed.size)
+            val componentIndices = IntArray(changed.size)
             stack[stackSize++] = index
             visited[index] = true
 
             while (stackSize > 0) {
                 val currentIndex = stack[--stackSize]
+                componentIndices[size] = currentIndex
                 size++
 
                 val x = currentIndex % GRID_WIDTH
@@ -229,6 +261,12 @@ class FrameDifferencingDetector(context: Context) {
                 minY = min(minY, y)
                 maxX = max(maxX, x)
                 maxY = max(maxY, y)
+                val delta = current[currentIndex] - reference[currentIndex]
+                if (delta < -CHANGE_THRESHOLD) {
+                    darker++
+                } else if (delta > CHANGE_THRESHOLD) {
+                    brighter++
+                }
                 val neighbors = intArrayOf(
                     currentIndex - 1,
                     currentIndex + 1,
@@ -254,24 +292,211 @@ class FrameDifferencingDetector(context: Context) {
                 largestMinY = minY
                 largestMaxX = maxX
                 largestMaxY = maxY
+                largestDarker = darker
+                largestBrighter = brighter
+                largestRegionIndices = componentIndices.copyOf(size)
             }
         }
 
-        if (largest == 0) return ChangedRegion(score = 0f, bounds = null)
+        if (largest == 0) {
+            return ChangedRegion(
+                score = 0f,
+                bounds = null,
+                addedObjectScore = 0f,
+                removedObjectScore = 0f,
+                confidence = 0f,
+                classification = ChangeClassification.None,
+            )
+        }
 
         val left = zoneBounds.left + zoneBounds.width * (largestMinX.toFloat() / GRID_WIDTH.toFloat())
         val top = zoneBounds.top + zoneBounds.height * (largestMinY.toFloat() / GRID_HEIGHT.toFloat())
         val right = zoneBounds.left + zoneBounds.width * ((largestMaxX + 1).toFloat() / GRID_WIDTH.toFloat())
         val bottom = zoneBounds.top + zoneBounds.height * ((largestMaxY + 1).toFloat() / GRID_HEIGHT.toFloat())
 
+        val score = largest.toFloat() / current.size.toFloat()
+        val darkerShare = largestDarker.toFloat() / largest.toFloat()
+        val brighterShare = largestBrighter.toFloat() / largest.toFloat()
+        val contrast = measureRegionContrast(
+            regionIndices = largestRegionIndices,
+            minX = largestMinX,
+            minY = largestMinY,
+            maxX = largestMaxX,
+            maxY = largestMaxY,
+            reference = reference,
+            current = current,
+        )
+        val verifier = classifyChange(
+            regionScore = score,
+            darkerShare = darkerShare,
+            brighterShare = brighterShare,
+            contrast = contrast,
+        )
+
         return ChangedRegion(
-            score = largest.toFloat() / current.size.toFloat(),
+            score = score,
             bounds = NormalizedRect(
                 left = left.coerceIn(0f, 1f),
                 top = top.coerceIn(0f, 1f),
                 right = right.coerceIn(0f, 1f),
                 bottom = bottom.coerceIn(0f, 1f),
             ),
+            addedObjectScore = verifier.addedObjectScore,
+            removedObjectScore = verifier.removedObjectScore,
+            confidence = verifier.confidence,
+            classification = verifier.classification,
+        )
+    }
+
+    private fun classifyChange(
+        regionScore: Float,
+        darkerShare: Float,
+        brighterShare: Float,
+        contrast: RegionContrast,
+    ): LocalVerifierResult {
+        if (regionScore < MIN_VERIFIER_REGION_SCORE) {
+            return LocalVerifierResult(
+                classification = ChangeClassification.None,
+                confidence = 0f,
+                addedObjectScore = 0f,
+                removedObjectScore = 0f,
+            )
+        }
+
+        val regionConfidence = (regionScore / STRONG_VERIFIER_REGION_SCORE).coerceIn(0f, 1f)
+        val contrastGap = contrast.currentContrast - contrast.referenceContrast
+        val contrastConfidence = (abs(contrastGap) / STRONG_CONTRAST_GAP).coerceIn(0f, 1f)
+        val contrastAddedScore = ((contrastGap - MIN_CONTRAST_GAP) / STRONG_CONTRAST_GAP)
+            .coerceIn(0f, 1f)
+        val contrastRemovedScore = ((-contrastGap - MIN_CONTRAST_GAP) / STRONG_CONTRAST_GAP)
+            .coerceIn(0f, 1f)
+        val addedScore = max(
+            contrastAddedScore,
+            (darkerShare * 0.50f + min(darkerShare, brighterShare) * 0.25f +
+                contrast.currentContrast * 0.25f).coerceIn(0f, 1f),
+        )
+        val removedScore = max(
+            contrastRemovedScore,
+            (brighterShare * 0.55f + contrast.referenceContrast * 0.30f).coerceIn(0f, 1f),
+        )
+        val confidence = (0.36f + 0.44f * regionConfidence + 0.20f * contrastConfidence)
+            .coerceIn(0f, 1f)
+        val strongAddedByContrast =
+            contrastGap >= MIN_CONTRAST_GAP && contrast.currentContrast >= MIN_OBJECT_CONTRAST
+        val strongRemovedByContrast =
+            -contrastGap >= MIN_CONTRAST_GAP && contrast.referenceContrast >= MIN_OBJECT_CONTRAST
+
+        return when {
+            strongAddedByContrast ->
+                LocalVerifierResult(
+                    classification = ChangeClassification.AddedObject,
+                    confidence = confidence,
+                    addedObjectScore = addedScore,
+                    removedObjectScore = removedScore,
+                )
+
+            strongRemovedByContrast ->
+                LocalVerifierResult(
+                    classification = ChangeClassification.RemovedReferenceObject,
+                    confidence = confidence,
+                    addedObjectScore = addedScore,
+                    removedObjectScore = removedScore,
+                )
+
+            regionScore >= BROAD_LIGHTING_REGION_SCORE && abs(contrastGap) < MIN_CONTRAST_GAP ->
+                LocalVerifierResult(
+                    classification = ChangeClassification.LightingChange,
+                    confidence = confidence,
+                    addedObjectScore = addedScore,
+                    removedObjectScore = removedScore,
+                )
+
+            darkerShare >= 0.58f || (darkerShare >= 0.42f && brighterShare >= 0.18f) ->
+                LocalVerifierResult(
+                    classification = ChangeClassification.AddedObject,
+                    confidence = confidence,
+                    addedObjectScore = addedScore,
+                    removedObjectScore = removedScore,
+                )
+
+            brighterShare >= 0.62f && contrast.referenceContrast >= contrast.currentContrast ->
+                LocalVerifierResult(
+                    classification = ChangeClassification.RemovedReferenceObject,
+                    confidence = confidence,
+                    addedObjectScore = addedScore,
+                    removedObjectScore = removedScore,
+                )
+
+            regionScore >= BROAD_LIGHTING_REGION_SCORE ->
+                LocalVerifierResult(
+                    classification = ChangeClassification.LightingChange,
+                    confidence = confidence,
+                    addedObjectScore = addedScore,
+                    removedObjectScore = removedScore,
+                )
+
+            else ->
+                LocalVerifierResult(
+                    classification = ChangeClassification.MixedChange,
+                    confidence = confidence * 0.72f,
+                    addedObjectScore = addedScore,
+                    removedObjectScore = removedScore,
+                )
+        }
+    }
+
+    private fun measureRegionContrast(
+        regionIndices: IntArray,
+        minX: Int,
+        minY: Int,
+        maxX: Int,
+        maxY: Int,
+        reference: IntArray,
+        current: IntArray,
+    ): RegionContrast {
+        if (regionIndices.isEmpty()) return RegionContrast.Zero
+
+        var currentInsideSum = 0.0
+        var referenceInsideSum = 0.0
+        regionIndices.forEach { index ->
+            currentInsideSum += current[index]
+            referenceInsideSum += reference[index]
+        }
+
+        var currentBorderSum = 0.0
+        var referenceBorderSum = 0.0
+        var borderCount = 0
+        val ringLeft = (minX - CONTRAST_RING_SIZE).coerceAtLeast(0)
+        val ringTop = (minY - CONTRAST_RING_SIZE).coerceAtLeast(0)
+        val ringRight = (maxX + CONTRAST_RING_SIZE).coerceAtMost(GRID_WIDTH - 1)
+        val ringBottom = (maxY + CONTRAST_RING_SIZE).coerceAtMost(GRID_HEIGHT - 1)
+
+        for (y in ringTop..ringBottom) {
+            for (x in ringLeft..ringRight) {
+                val insideRegionBox = x in minX..maxX && y in minY..maxY
+                if (insideRegionBox) continue
+
+                val index = y * GRID_WIDTH + x
+                currentBorderSum += current[index]
+                referenceBorderSum += reference[index]
+                borderCount++
+            }
+        }
+
+        if (borderCount == 0) return RegionContrast.Zero
+
+        val currentInsideMean = currentInsideSum / regionIndices.size.toDouble()
+        val referenceInsideMean = referenceInsideSum / regionIndices.size.toDouble()
+        val currentBorderMean = currentBorderSum / borderCount.toDouble()
+        val referenceBorderMean = referenceBorderSum / borderCount.toDouble()
+
+        return RegionContrast(
+            currentContrast = (abs(currentInsideMean - currentBorderMean) / 255.0)
+                .toFloat()
+                .coerceIn(0f, 1f),
+            referenceContrast = (abs(referenceInsideMean - referenceBorderMean) / 255.0)
+                .toFloat()
+                .coerceIn(0f, 1f),
         )
     }
 
@@ -309,7 +534,27 @@ class FrameDifferencingDetector(context: Context) {
     private data class ChangedRegion(
         val score: Float,
         val bounds: NormalizedRect?,
+        val addedObjectScore: Float,
+        val removedObjectScore: Float,
+        val confidence: Float,
+        val classification: ChangeClassification,
     )
+
+    private data class LocalVerifierResult(
+        val classification: ChangeClassification,
+        val confidence: Float,
+        val addedObjectScore: Float,
+        val removedObjectScore: Float,
+    )
+
+    private data class RegionContrast(
+        val currentContrast: Float,
+        val referenceContrast: Float,
+    ) {
+        companion object {
+            val Zero = RegionContrast(0f, 0f)
+        }
+    }
 
     private companion object {
         const val LUMA_MAGIC = 0x4149504D
@@ -318,6 +563,13 @@ class FrameDifferencingDetector(context: Context) {
         const val GRID_HEIGHT = 36
         const val CHANGE_THRESHOLD = 28
         const val MOTION_THRESHOLD = 16
+        const val MIN_VERIFIER_REGION_SCORE = 0.012f
+        const val STRONG_VERIFIER_REGION_SCORE = 0.06f
+        const val BROAD_LIGHTING_REGION_SCORE = 0.24f
+        const val CONTRAST_RING_SIZE = 2
+        const val MIN_CONTRAST_GAP = 0.045f
+        const val STRONG_CONTRAST_GAP = 0.16f
+        const val MIN_OBJECT_CONTRAST = 0.055f
         const val DEFAULT_TABLE_ZONE_ID = "packing-table"
     }
 

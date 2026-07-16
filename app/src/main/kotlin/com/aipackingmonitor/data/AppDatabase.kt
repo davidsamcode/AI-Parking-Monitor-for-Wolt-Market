@@ -7,7 +7,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [AlertEventEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -25,6 +25,15 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE alert_events ADD COLUMN changedRegionTop REAL")
                 db.execSQL("ALTER TABLE alert_events ADD COLUMN changedRegionRight REAL")
                 db.execSQL("ALTER TABLE alert_events ADD COLUMN changedRegionBottom REAL")
+            }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE alert_events ADD COLUMN addedObjectScore REAL")
+                db.execSQL("ALTER TABLE alert_events ADD COLUMN removedObjectScore REAL")
+                db.execSQL("ALTER TABLE alert_events ADD COLUMN localVerifierDecision TEXT")
+                db.execSQL("ALTER TABLE alert_events ADD COLUMN localVerifierConfidence REAL")
             }
         }
     }

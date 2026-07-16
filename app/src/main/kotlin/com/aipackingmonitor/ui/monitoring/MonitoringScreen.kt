@@ -618,6 +618,15 @@ private fun MetricsPanel(uiState: MonitoringUiState) {
                 MetricCell("Avg response", duration(uiState.summary.averageResponseTimeMs), Modifier.weight(1f))
                 MetricCell("State", uiState.snapshot.state.name, Modifier.weight(1f))
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MetricCell("Verifier", uiState.snapshot.changeClassification.name, Modifier.weight(1f))
+                MetricCell("Confidence", percent(uiState.snapshot.localVerifierConfidence), Modifier.weight(1f))
+                MetricCell(
+                    "Added/removed",
+                    "${percent(uiState.snapshot.addedObjectScore)} / ${percent(uiState.snapshot.removedObjectScore)}",
+                    Modifier.weight(1f),
+                )
+            }
         }
     }
 }
@@ -836,6 +845,18 @@ private fun EventRow(event: AlertEventEntity) {
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            event.localVerifierDecision?.let { decision ->
+                val confidence = event.localVerifierConfidence ?: 0f
+                val added = event.addedObjectScore ?: 0f
+                val removed = event.removedObjectScore ?: 0f
+                Text(
+                    text = "Verifier $decision ${percent(confidence)}; added ${percent(added)}, removed ${percent(removed)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
