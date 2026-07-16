@@ -42,7 +42,9 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.aipackingmonitor.domain.model.DetectionResult
 import com.aipackingmonitor.domain.model.MonitoringState
 import com.aipackingmonitor.domain.model.MonitoringZone
+import com.aipackingmonitor.domain.model.NormalizedRect
 import com.aipackingmonitor.vision.FrameDifferencingDetector
+import kotlin.math.max
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -101,7 +103,8 @@ fun CameraPreviewPanel(
     uiState: MonitoringUiState,
     onDetection: (DetectionResult) -> Unit,
     onReferenceCaptured: (Boolean) -> Unit,
-    onReferenceAvailabilityChanged: (Boolean) -> Unit,
+    onCartReferenceCaptured: (Boolean) -> Unit,
+    onReferenceAvailabilityChanged: (String, Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -110,19 +113,48 @@ fun CameraPreviewPanel(
     ) {
         CameraFeed(
             zone = uiState.zone,
+            cartZone = uiState.cartZone,
             referenceCaptureRequest = uiState.referenceCaptureRequest,
+            cartReferenceCaptureRequest = uiState.cartReferenceCaptureRequest,
             onDetection = onDetection,
             onReferenceCaptured = onReferenceCaptured,
+            onCartReferenceCaptured = onCartReferenceCaptured,
             onReferenceAvailabilityChanged = onReferenceAvailabilityChanged,
         )
         ZoneOverlay(
             zone = if (uiState.areaSetupActive) {
-                uiState.zone.copy(bounds = uiState.draftZoneBounds)
+                when (uiState.areaSetupTarget) {
+                    AreaSetupTarget.Table -> uiState.zone.copy(bounds = uiState.draftZoneBounds)
+                    AreaSetupTarget.Cart -> uiState.zone
+                }
             } else {
                 uiState.zone
             },
             state = uiState.snapshot.state,
-            setupActive = uiState.areaSetupActive,
+            suspectedRegion = if (uiState.snapshot.state == MonitoringState.LeftoverAlert) {
+                uiState.snapshot.changedRegionBounds
+            } else {
+                null
+            },
+            setupActive = uiState.areaSetupActive && uiState.areaSetupTarget == AreaSetupTarget.Table,
+            modifier = Modifier.fillMaxSize(),
+        )
+        ZoneOverlay(
+            zone = if (uiState.areaSetupActive) {
+                when (uiState.areaSetupTarget) {
+                    AreaSetupTarget.Table -> uiState.cartZone
+                    AreaSetupTarget.Cart -> uiState.cartZone.copy(bounds = uiState.draftZoneBounds)
+                }
+            } else {
+                uiState.cartZone
+            },
+            state = uiState.cartSnapshot.state,
+            suspectedRegion = if (uiState.cartSnapshot.state == MonitoringState.LeftoverAlert) {
+                uiState.cartSnapshot.changedRegionBounds
+            } else {
+                null
+            },
+            setupActive = uiState.areaSetupActive && uiState.areaSetupTarget == AreaSetupTarget.Cart,
             modifier = Modifier.fillMaxSize(),
         )
     }
@@ -131,10 +163,13 @@ fun CameraPreviewPanel(
 @Composable
 private fun CameraFeed(
     zone: MonitoringZone,
+    cartZone: MonitoringZone,
     referenceCaptureRequest: Long,
+    cartReferenceCaptureRequest: Long,
     onDetection: (DetectionResult) -> Unit,
     onReferenceCaptured: (Boolean) -> Unit,
-    onReferenceAvailabilityChanged: (Boolean) -> Unit,
+    onCartReferenceCaptured: (Boolean) -> Unit,
+    onReferenceAvailabilityChanged: (String, Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -148,20 +183,35 @@ private fun CameraFeed(
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
     val captureRequest = remember { AtomicLong(referenceCaptureRequest) }
     val handledCaptureRequest = remember { AtomicLong(referenceCaptureRequest) }
+    val cartCaptureRequest = remember { AtomicLong(cartReferenceCaptureRequest) }
+    val handledCartCaptureRequest = remember { AtomicLong(cartReferenceCaptureRequest) }
     val zoneRef = remember { AtomicReference(zone) }
+    val cartZoneRef = remember { AtomicReference(cartZone) }
     val mainExecutor = remember(context) { ContextCompat.getMainExecutor(context) }
 
     LaunchedEffect(referenceCaptureRequest) {
         captureRequest.set(referenceCaptureRequest)
     }
 
+    LaunchedEffect(cartReferenceCaptureRequest) {
+        cartCaptureRequest.set(cartReferenceCaptureRequest)
+    }
+
     LaunchedEffect(detector) {
-        onReferenceAvailabilityChanged(detector.hasReference(zoneRef.get()))
+        val zoneSnapshot = zoneRef.get()
+        val cartZoneSnapshot = cartZoneRef.get()
+        onReferenceAvailabilityChanged(zoneSnapshot.id, detector.hasReference(zoneSnapshot))
+        onReferenceAvailabilityChanged(cartZoneSnapshot.id, detector.hasReference(cartZoneSnapshot))
     }
 
     LaunchedEffect(zone) {
         zoneRef.set(zone)
-        onReferenceAvailabilityChanged(detector.hasReference(zone))
+        onReferenceAvailabilityChanged(zone.id, detector.hasReference(zone))
+    }
+
+    LaunchedEffect(cartZone) {
+        cartZoneRef.set(cartZone)
+        onReferenceAvailabilityChanged(cartZone.id, detector.hasReference(cartZone))
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -181,16 +231,35 @@ private fun CameraFeed(
                             try {
                                 val requested = captureRequest.get()
                                 val zoneSnapshot = zoneRef.get()
+                                val cartRequested = cartCaptureRequest.get()
+                                val cartZoneSnapshot = cartZoneRef.get()
                                 if (requested > handledCaptureRequest.get()) {
                                     val captured = detector.captureReference(image, zoneSnapshot)
                                     handledCaptureRequest.set(requested)
                                     mainExecutor.execute {
                                         onReferenceCaptured(captured)
-                                        onReferenceAvailabilityChanged(detector.hasReference(zoneSnapshot))
+                                        onReferenceAvailabilityChanged(
+                                            zoneSnapshot.id,
+                                            detector.hasReference(zoneSnapshot),
+                                        )
+                                    }
+                                } else if (cartRequested > handledCartCaptureRequest.get()) {
+                                    val captured = detector.captureReference(image, cartZoneSnapshot)
+                                    handledCartCaptureRequest.set(cartRequested)
+                                    mainExecutor.execute {
+                                        onCartReferenceCaptured(captured)
+                                        onReferenceAvailabilityChanged(
+                                            cartZoneSnapshot.id,
+                                            detector.hasReference(cartZoneSnapshot),
+                                        )
                                     }
                                 } else {
                                     val detection = detector.detect(image, zoneSnapshot)
-                                    mainExecutor.execute { onDetection(detection) }
+                                    val cartDetection = detector.detect(image, cartZoneSnapshot)
+                                    mainExecutor.execute {
+                                        onDetection(detection)
+                                        onDetection(cartDetection)
+                                    }
                                 }
                             } finally {
                                 image.close()
@@ -228,6 +297,7 @@ private fun CameraFeed(
 private fun ZoneOverlay(
     zone: MonitoringZone,
     state: MonitoringState,
+    suspectedRegion: NormalizedRect?,
     setupActive: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -272,6 +342,30 @@ private fun ZoneOverlay(
                 color = color,
                 radius = handleRadius,
                 center = Offset(left + rectSize.width, top + rectSize.height),
+            )
+        }
+
+        if (suspectedRegion != null) {
+            val regionLeft = size.width * suspectedRegion.left
+            val regionTop = size.height * suspectedRegion.top
+            val regionWidth = size.width * suspectedRegion.width
+            val regionHeight = size.height * suspectedRegion.height
+            val center = Offset(
+                x = regionLeft + regionWidth / 2f,
+                y = regionTop + regionHeight / 2f,
+            )
+            val radius = max(regionWidth, regionHeight) / 2f + 10.dp.toPx()
+            val alertColor = Color(0xFFE53935)
+            drawCircle(
+                color = alertColor.copy(alpha = 0.14f),
+                radius = radius,
+                center = center,
+            )
+            drawCircle(
+                color = alertColor,
+                radius = radius,
+                center = center,
+                style = Stroke(width = 5.dp.toPx(), cap = StrokeCap.Round),
             )
         }
     }

@@ -57,6 +57,7 @@ data class DetectionResult(
     val isMotionStable: Boolean,
     val quality: DetectionQuality,
     val analysisLatencyMs: Long,
+    val changedRegionBounds: NormalizedRect? = null,
 ) {
     init {
         require(occupancyScore in 0f..1f) { "occupancyScore must be in 0..1" }
@@ -117,6 +118,7 @@ data class MonitoringSnapshot(
     val occupancyScore: Float,
     val motionScore: Float,
     val largestChangedRegionScore: Float,
+    val changedRegionBounds: NormalizedRect?,
     val stateChangedAtMillis: Long,
     val packingStartedAtMillis: Long?,
     val quietSinceMillis: Long?,
@@ -135,6 +137,7 @@ data class MonitoringSnapshot(
                 occupancyScore = 0f,
                 motionScore = 0f,
                 largestChangedRegionScore = 0f,
+                changedRegionBounds = null,
                 stateChangedAtMillis = nowMillis,
                 packingStartedAtMillis = null,
                 quietSinceMillis = null,

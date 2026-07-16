@@ -70,8 +70,10 @@ fun MonitoringRoute(
         onCameraPermissionChanged = viewModel::onCameraPermissionChanged,
         onDetection = viewModel::onDetection,
         onReferenceCaptured = viewModel::onReferenceCaptureResult,
+        onCartReferenceCaptured = viewModel::onCartReferenceCaptureResult,
         onReferenceAvailabilityChanged = viewModel::onReferenceAvailabilityChanged,
         onCaptureReference = viewModel::requestReferenceCapture,
+        onCaptureCartReference = viewModel::requestCartReferenceCapture,
         onToggleMonitoring = viewModel::toggleMonitoring,
         onDismissAlert = viewModel::dismissAlert,
         onMarkFeedback = viewModel::markFeedback,
@@ -81,6 +83,7 @@ fun MonitoringRoute(
         onAlarmVolumeChanged = viewModel::updateAlarmVolume,
         onVibrationChanged = viewModel::updateVibrationEnabled,
         onStartAreaSetup = viewModel::startAreaSetup,
+        onStartCartAreaSetup = viewModel::startCartAreaSetup,
         onCancelAreaSetup = viewModel::cancelAreaSetup,
         onDraftZoneChanged = viewModel::updateDraftZoneBounds,
         onSaveAreaSetup = viewModel::saveAreaSetup,
@@ -105,8 +108,10 @@ private fun MonitoringScreen(
     onCameraPermissionChanged: (Boolean) -> Unit,
     onDetection: (com.aipackingmonitor.domain.model.DetectionResult) -> Unit,
     onReferenceCaptured: (Boolean) -> Unit,
-    onReferenceAvailabilityChanged: (Boolean) -> Unit,
+    onCartReferenceCaptured: (Boolean) -> Unit,
+    onReferenceAvailabilityChanged: (String, Boolean) -> Unit,
     onCaptureReference: () -> Unit,
+    onCaptureCartReference: () -> Unit,
     onToggleMonitoring: () -> Unit,
     onDismissAlert: () -> Unit,
     onMarkFeedback: (Boolean) -> Unit,
@@ -116,6 +121,7 @@ private fun MonitoringScreen(
     onAlarmVolumeChanged: (Int) -> Unit,
     onVibrationChanged: (Boolean) -> Unit,
     onStartAreaSetup: () -> Unit,
+    onStartCartAreaSetup: () -> Unit,
     onCancelAreaSetup: () -> Unit,
     onDraftZoneChanged: (NormalizedRect) -> Unit,
     onSaveAreaSetup: () -> Unit,
@@ -143,6 +149,7 @@ private fun MonitoringScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             StatusBanner(uiState)
+            CartStatusBanner(uiState)
 
             Box(
                 modifier = Modifier
@@ -158,6 +165,7 @@ private fun MonitoringScreen(
                         uiState = uiState,
                         onDetection = onDetection,
                         onReferenceCaptured = onReferenceCaptured,
+                        onCartReferenceCaptured = onCartReferenceCaptured,
                         onReferenceAvailabilityChanged = onReferenceAvailabilityChanged,
                         modifier = Modifier.fillMaxSize(),
                     )
@@ -167,9 +175,11 @@ private fun MonitoringScreen(
             ControlsPanel(
                 uiState = uiState,
                 onCaptureReference = onCaptureReference,
+                onCaptureCartReference = onCaptureCartReference,
                 onToggleMonitoring = onToggleMonitoring,
                 onDismissAlert = onDismissAlert,
                 onStartAreaSetup = onStartAreaSetup,
+                onStartCartAreaSetup = onStartCartAreaSetup,
                 onCancelAreaSetup = onCancelAreaSetup,
                 onSaveAreaSetup = onSaveAreaSetup,
             )
@@ -177,6 +187,7 @@ private fun MonitoringScreen(
             if (uiState.areaSetupActive) {
                 AreaSetupPanel(
                     bounds = uiState.draftZoneBounds,
+                    target = uiState.areaSetupTarget,
                     onBoundsChanged = onDraftZoneChanged,
                 )
             }
@@ -269,14 +280,74 @@ private fun StatusBanner(uiState: MonitoringUiState) {
     }
 }
 
+@Composable
+private fun CartStatusBanner(uiState: MonitoringUiState) {
+    val state = uiState.cartSnapshot.state
+    val color = when {
+        !uiState.cartReferenceReady -> Color(0xFF60A5FA)
+        !uiState.cartPresent -> Color(0xFFF59E0B)
+        else -> statusColor(state)
+    }
+    val label = when {
+        !uiState.cartReferenceReady -> "Cart reference needed"
+        !uiState.cartPresent -> "Cart away"
+        state == MonitoringState.LeftoverAlert -> "Check cart"
+        state == MonitoringState.PackingActive -> "Cart active"
+        state == MonitoringState.PostPackScan -> "Scanning cart"
+        else -> "Cart ready"
+    }
+    val detail = when {
+        !uiState.cartReferenceReady -> "Capture the empty cart while it is parked in its marked position."
+        !uiState.cartPresent -> "Cart zone is ignored until the cart returns to the reference position."
+        state == MonitoringState.LeftoverAlert -> "Possible item left in the cart or basket."
+        else -> "Cart occupancy ${percent(uiState.cartSnapshot.occupancyScore)}."
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = color.copy(alpha = 0.10f),
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(
+                imageVector = if (state == MonitoringState.LeftoverAlert) {
+                    Icons.Default.Warning
+                } else {
+                    Icons.Default.Check
+                },
+                contentDescription = null,
+                tint = color,
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = detail,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ControlsPanel(
     uiState: MonitoringUiState,
     onCaptureReference: () -> Unit,
+    onCaptureCartReference: () -> Unit,
     onToggleMonitoring: () -> Unit,
     onDismissAlert: () -> Unit,
     onStartAreaSetup: () -> Unit,
+    onStartCartAreaSetup: () -> Unit,
     onCancelAreaSetup: () -> Unit,
     onSaveAreaSetup: () -> Unit,
 ) {
@@ -293,7 +364,19 @@ private fun ControlsPanel(
             Icon(Icons.Default.PhotoCamera, contentDescription = null)
             Text(
                 modifier = Modifier.padding(start = 8.dp),
-                text = "Capture empty",
+                text = "Capture table",
+            )
+        }
+
+        FilledTonalButton(
+            shape = RoundedCornerShape(8.dp),
+            onClick = onCaptureCartReference,
+            enabled = uiState.cameraPermissionGranted && !uiState.areaSetupActive,
+        ) {
+            Icon(Icons.Default.PhotoCamera, contentDescription = null)
+            Text(
+                modifier = Modifier.padding(start = 8.dp),
+                text = "Capture cart",
             )
         }
 
@@ -312,7 +395,9 @@ private fun ControlsPanel(
             )
         }
 
-        if (uiState.snapshot.state == MonitoringState.LeftoverAlert) {
+        if (uiState.snapshot.state == MonitoringState.LeftoverAlert ||
+            uiState.cartSnapshot.state == MonitoringState.LeftoverAlert
+        ) {
             OutlinedButton(
                 shape = RoundedCornerShape(8.dp),
                 onClick = onDismissAlert,
@@ -355,7 +440,18 @@ private fun ControlsPanel(
                 Icon(Icons.Default.Settings, contentDescription = null)
                 Text(
                     modifier = Modifier.padding(start = 8.dp),
-                    text = "Set area",
+                    text = "Set table",
+                )
+            }
+            OutlinedButton(
+                shape = RoundedCornerShape(8.dp),
+                onClick = onStartCartAreaSetup,
+                enabled = uiState.cameraPermissionGranted,
+            ) {
+                Icon(Icons.Default.Settings, contentDescription = null)
+                Text(
+                    modifier = Modifier.padding(start = 8.dp),
+                    text = "Set cart",
                 )
             }
         }
@@ -365,6 +461,7 @@ private fun ControlsPanel(
 @Composable
 private fun AreaSetupPanel(
     bounds: NormalizedRect,
+    target: AreaSetupTarget,
     onBoundsChanged: (NormalizedRect) -> Unit,
 ) {
     Card(
@@ -377,12 +474,20 @@ private fun AreaSetupPanel(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = "Packing area crop",
+                text = when (target) {
+                    AreaSetupTarget.Table -> "Packing table crop"
+                    AreaSetupTarget.Cart -> "Cart crop"
+                },
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                text = "Adjust the blue rectangle so it covers only the table area that should be checked after packing.",
+                text = when (target) {
+                    AreaSetupTarget.Table ->
+                        "Adjust the blue rectangle so it covers only the table surface checked after packing."
+                    AreaSetupTarget.Cart ->
+                        "Adjust the blue rectangle so it covers the parked cart baskets, not the floor or shelves."
+                },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -725,6 +830,15 @@ private fun EventRow(event: AlertEventEntity) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            event.triggerReason?.let { reason ->
+                Text(
+                    text = reason,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }

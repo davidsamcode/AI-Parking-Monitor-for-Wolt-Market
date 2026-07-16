@@ -80,16 +80,23 @@ class MonitoringStateMachineTest {
     @Test
     fun `post pack scan alerts only when leftover remains`() {
         val scanning = postPackScanAt(5_000)
+        val changedRegion = NormalizedRect(0.3f, 0.3f, 0.45f, 0.45f)
 
         val alerting = stateMachine.reduce(
             previous = scanning,
             zone = zone,
-            detection = detection(score = 0.08f, motion = 0.01f, largestRegion = 0.035f),
+            detection = detection(
+                score = 0.08f,
+                motion = 0.01f,
+                largestRegion = 0.035f,
+                changedRegion = changedRegion,
+            ),
             nowMillis = 6_100,
         )
 
         assertEquals(MonitoringState.LeftoverAlert, alerting.state)
         assertEquals(6_100, alerting.alertStartedAtMillis)
+        assertEquals(changedRegion, alerting.changedRegionBounds)
     }
 
     @Test
@@ -227,6 +234,7 @@ class MonitoringStateMachineTest {
         largestRegion: Float = score,
         quality: DetectionQuality = DetectionQuality.Valid,
         stable: Boolean = true,
+        changedRegion: NormalizedRect? = null,
     ): DetectionResult =
         DetectionResult(
             zoneId = zone.id,
@@ -236,5 +244,6 @@ class MonitoringStateMachineTest {
             isMotionStable = stable,
             quality = quality,
             analysisLatencyMs = 12,
+            changedRegionBounds = changedRegion,
         )
 }

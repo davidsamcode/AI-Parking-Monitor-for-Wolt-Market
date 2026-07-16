@@ -28,7 +28,10 @@ object AppModule {
             context,
             AppDatabase::class.java,
             "packing-monitor.db",
-        ).fallbackToDestructiveMigration().build()
+        )
+            .addMigrations(AppDatabase.MIGRATION_1_2)
+            .fallbackToDestructiveMigration()
+            .build()
 
     @Provides
     fun provideAlertEventDao(database: AppDatabase) = database.alertEventDao()

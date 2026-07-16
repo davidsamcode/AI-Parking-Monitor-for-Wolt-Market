@@ -23,12 +23,12 @@ import kotlin.math.sqrt
 
 class FrameDifferencingDetector(context: Context) {
     private val referenceStore = ReferenceStore(context.applicationContext)
-    private var reference: LumaReference? = referenceStore.loadLumaReference()
-    private var previousSamples: IntArray? = null
+    private val references = mutableMapOf<String, LumaReference?>()
+    private val previousSamples = mutableMapOf<String, IntArray>()
 
     @Synchronized
     fun hasReference(zone: MonitoringZone): Boolean =
-        reference?.zoneBounds?.approximatelyEquals(zone.bounds) == true
+        referenceFor(zone)?.zoneBounds?.approximatelyEquals(zone.bounds) == true
 
     @Synchronized
     fun captureReference(image: ImageProxy, zone: MonitoringZone): Boolean {
@@ -40,23 +40,24 @@ class FrameDifferencingDetector(context: Context) {
             zoneBounds = zone.bounds,
             samples = samples.values,
         )
-        referenceStore.saveLumaReference(nextReference)
-        referenceStore.saveJpegReference(image)
-        reference = nextReference
-        previousSamples = null
+        referenceStore.saveLumaReference(zone.id, nextReference)
+        referenceStore.saveJpegReference(zone.id, image)
+        references[zone.id] = nextReference
+        previousSamples.remove(zone.id)
         return true
     }
 
     @Synchronized
     fun detect(image: ImageProxy, zone: MonitoringZone): DetectionResult {
         val started = System.nanoTime()
-        val savedReference = reference
+        val savedReference = referenceFor(zone)
         if (savedReference == null) {
             return result(
                 zone = zone,
                 occupancy = 0f,
                 motion = 0f,
                 largestChangedRegion = 0f,
+                changedRegionBounds = null,
                 stable = false,
                 quality = DetectionQuality.NoReference,
                 startedNanos = started,
@@ -68,6 +69,7 @@ class FrameDifferencingDetector(context: Context) {
                 occupancy = 0f,
                 motion = 0f,
                 largestChangedRegion = 0f,
+                changedRegionBounds = null,
                 stable = false,
                 quality = DetectionQuality.NoReference,
                 startedNanos = started,
@@ -81,6 +83,7 @@ class FrameDifferencingDetector(context: Context) {
                 occupancy = 0f,
                 motion = 0f,
                 largestChangedRegion = 0f,
+                changedRegionBounds = null,
                 stable = false,
                 quality = current.quality,
                 startedNanos = started,
@@ -91,11 +94,12 @@ class FrameDifferencingDetector(context: Context) {
             abs(current.values[index] - savedReference.samples[index]) > CHANGE_THRESHOLD
         }
         val occupancy = diffCount.toFloat() / current.values.size.toFloat()
-        val largestChangedRegion = largestChangedRegionScore(
+        val largestChangedRegion = largestChangedRegion(
+            zoneBounds = zone.bounds,
             reference = savedReference.samples,
             current = current.values,
         )
-        val previous = previousSamples
+        val previous = previousSamples[zone.id]
         val motionScore = if (previous == null) {
             0f
         } else {
@@ -103,7 +107,7 @@ class FrameDifferencingDetector(context: Context) {
                 abs(current.values[index] - previous[index]) > MOTION_THRESHOLD
             }.toFloat() / current.values.size.toFloat()
         }
-        previousSamples = current.values
+        previousSamples[zone.id] = current.values
 
         val quality = when {
             occupancy > 0.82f && motionScore < 0.03f -> DetectionQuality.ReferenceMisaligned
@@ -114,7 +118,8 @@ class FrameDifferencingDetector(context: Context) {
             zone = zone,
             occupancy = occupancy,
             motion = motionScore,
-            largestChangedRegion = largestChangedRegion,
+            largestChangedRegion = largestChangedRegion.score,
+            changedRegionBounds = largestChangedRegion.bounds,
             stable = motionScore < 0.045f,
             quality = quality,
             startedNanos = started,
@@ -170,6 +175,7 @@ class FrameDifferencingDetector(context: Context) {
         occupancy: Float,
         motion: Float,
         largestChangedRegion: Float,
+        changedRegionBounds: NormalizedRect?,
         stable: Boolean,
         quality: DetectionQuality,
         startedNanos: Long,
@@ -182,23 +188,33 @@ class FrameDifferencingDetector(context: Context) {
             isMotionStable = stable,
             quality = quality,
             analysisLatencyMs = (System.nanoTime() - startedNanos) / 1_000_000,
+            changedRegionBounds = changedRegionBounds,
         )
 
-    private fun largestChangedRegionScore(
+    private fun largestChangedRegion(
+        zoneBounds: NormalizedRect,
         reference: IntArray,
         current: IntArray,
-    ): Float {
+    ): ChangedRegion {
         val changed = BooleanArray(current.size) { index ->
             abs(current[index] - reference[index]) > CHANGE_THRESHOLD
         }
         val visited = BooleanArray(current.size)
         var largest = 0
+        var largestMinX = 0
+        var largestMinY = 0
+        var largestMaxX = 0
+        var largestMaxY = 0
 
         for (index in changed.indices) {
             if (!changed[index] || visited[index]) continue
 
             var size = 0
             var stackSize = 0
+            var minX = GRID_WIDTH
+            var minY = GRID_HEIGHT
+            var maxX = 0
+            var maxY = 0
             val stack = IntArray(changed.size)
             stack[stackSize++] = index
             visited[index] = true
@@ -209,6 +225,10 @@ class FrameDifferencingDetector(context: Context) {
 
                 val x = currentIndex % GRID_WIDTH
                 val y = currentIndex / GRID_WIDTH
+                minX = min(minX, x)
+                minY = min(minY, y)
+                maxX = max(maxX, x)
+                maxY = max(maxY, y)
                 val neighbors = intArrayOf(
                     currentIndex - 1,
                     currentIndex + 1,
@@ -228,10 +248,31 @@ class FrameDifferencingDetector(context: Context) {
                 }
             }
 
-            largest = max(largest, size)
+            if (size > largest) {
+                largest = size
+                largestMinX = minX
+                largestMinY = minY
+                largestMaxX = maxX
+                largestMaxY = maxY
+            }
         }
 
-        return largest.toFloat() / current.size.toFloat()
+        if (largest == 0) return ChangedRegion(score = 0f, bounds = null)
+
+        val left = zoneBounds.left + zoneBounds.width * (largestMinX.toFloat() / GRID_WIDTH.toFloat())
+        val top = zoneBounds.top + zoneBounds.height * (largestMinY.toFloat() / GRID_HEIGHT.toFloat())
+        val right = zoneBounds.left + zoneBounds.width * ((largestMaxX + 1).toFloat() / GRID_WIDTH.toFloat())
+        val bottom = zoneBounds.top + zoneBounds.height * ((largestMaxY + 1).toFloat() / GRID_HEIGHT.toFloat())
+
+        return ChangedRegion(
+            score = largest.toFloat() / current.size.toFloat(),
+            bounds = NormalizedRect(
+                left = left.coerceIn(0f, 1f),
+                top = top.coerceIn(0f, 1f),
+                right = right.coerceIn(0f, 1f),
+                bottom = bottom.coerceIn(0f, 1f),
+            ),
+        )
     }
 
     private fun lerp(start: Int, end: Int, index: Int, total: Int): Int {
@@ -245,6 +286,9 @@ class FrameDifferencingDetector(context: Context) {
             abs(top - other.top) < 0.001f &&
             abs(right - other.right) < 0.001f &&
             abs(bottom - other.bottom) < 0.001f
+
+    private fun referenceFor(zone: MonitoringZone): LumaReference? =
+        references.getOrPut(zone.id) { referenceStore.loadLumaReference(zone.id) }
 
     data class LumaReference(
         val width: Int,
@@ -262,6 +306,11 @@ class FrameDifferencingDetector(context: Context) {
         }
     }
 
+    private data class ChangedRegion(
+        val score: Float,
+        val bounds: NormalizedRect?,
+    )
+
     private companion object {
         const val LUMA_MAGIC = 0x4149504D
         const val LUMA_VERSION = 1
@@ -269,18 +318,23 @@ class FrameDifferencingDetector(context: Context) {
         const val GRID_HEIGHT = 36
         const val CHANGE_THRESHOLD = 28
         const val MOTION_THRESHOLD = 16
+        const val DEFAULT_TABLE_ZONE_ID = "packing-table"
     }
 
     private class ReferenceStore(context: Context) {
         private val directory = File(context.filesDir, "references")
-        private val lumaFile = File(directory, "reference-luma.bin")
-        private val jpegFile = File(directory, "reference.jpg")
 
-        fun loadLumaReference(): LumaReference? {
-            if (!lumaFile.exists()) return null
+        fun loadLumaReference(zoneId: String): LumaReference? {
+            val lumaFile = lumaFile(zoneId)
+            val fallbackFile = File(directory, "reference-luma.bin")
+            val sourceFile = when {
+                lumaFile.exists() -> lumaFile
+                zoneId == DEFAULT_TABLE_ZONE_ID && fallbackFile.exists() -> fallbackFile
+                else -> return null
+            }
 
             return runCatching {
-                DataInputStream(BufferedInputStream(FileInputStream(lumaFile))).use { input ->
+                DataInputStream(BufferedInputStream(FileInputStream(sourceFile))).use { input ->
                     val magic = input.readInt()
                     val version = input.readInt()
                     if (magic != LUMA_MAGIC || version != LUMA_VERSION) return null
@@ -311,9 +365,9 @@ class FrameDifferencingDetector(context: Context) {
             }.getOrNull()
         }
 
-        fun saveLumaReference(reference: LumaReference) {
+        fun saveLumaReference(zoneId: String, reference: LumaReference) {
             directory.mkdirs()
-            DataOutputStream(BufferedOutputStream(FileOutputStream(lumaFile))).use { output ->
+            DataOutputStream(BufferedOutputStream(FileOutputStream(lumaFile(zoneId)))).use { output ->
                 output.writeInt(LUMA_MAGIC)
                 output.writeInt(LUMA_VERSION)
                 output.writeInt(reference.width)
@@ -327,16 +381,25 @@ class FrameDifferencingDetector(context: Context) {
             }
         }
 
-        fun saveJpegReference(image: ImageProxy) {
+        fun saveJpegReference(zoneId: String, image: ImageProxy) {
             directory.mkdirs()
             runCatching {
                 val nv21 = image.toNv21()
                 val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
-                FileOutputStream(jpegFile).use { output ->
+                FileOutputStream(jpegFile(zoneId)).use { output ->
                     yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), 86, output)
                 }
             }
         }
+
+        private fun lumaFile(zoneId: String): File =
+            File(directory, "reference-luma-${zoneId.safeFileName()}.bin")
+
+        private fun jpegFile(zoneId: String): File =
+            File(directory, "reference-${zoneId.safeFileName()}.jpg")
+
+        private fun String.safeFileName(): String =
+            replace(Regex("[^A-Za-z0-9_.-]"), "_")
 
         private fun ImageProxy.toNv21(): ByteArray {
             val ySize = width * height

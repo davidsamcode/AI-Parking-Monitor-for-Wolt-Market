@@ -31,6 +31,10 @@ class SettingsRepository @Inject constructor(
                 zoneTop = preferences[ZONE_TOP] ?: 0.18f,
                 zoneRight = preferences[ZONE_RIGHT] ?: 0.88f,
                 zoneBottom = preferences[ZONE_BOTTOM] ?: 0.82f,
+                cartZoneLeft = preferences[CART_ZONE_LEFT] ?: 0.08f,
+                cartZoneTop = preferences[CART_ZONE_TOP] ?: 0.46f,
+                cartZoneRight = preferences[CART_ZONE_RIGHT] ?: 0.94f,
+                cartZoneBottom = preferences[CART_ZONE_BOTTOM] ?: 0.96f,
             )
         }
 
@@ -73,6 +77,25 @@ class SettingsRepository @Inject constructor(
         }
     }
 
+    suspend fun updateCartZoneBounds(
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+    ) {
+        val normalizedLeft = left.coerceIn(0f, 0.94f)
+        val normalizedTop = top.coerceIn(0f, 0.94f)
+        val normalizedRight = right.coerceIn(normalizedLeft + MIN_ZONE_SIZE, 1f)
+        val normalizedBottom = bottom.coerceIn(normalizedTop + MIN_ZONE_SIZE, 1f)
+
+        context.settingsDataStore.edit {
+            it[CART_ZONE_LEFT] = normalizedLeft
+            it[CART_ZONE_TOP] = normalizedTop
+            it[CART_ZONE_RIGHT] = normalizedRight
+            it[CART_ZONE_BOTTOM] = normalizedBottom
+        }
+    }
+
     private companion object {
         const val MIN_ZONE_SIZE = 0.06f
 
@@ -85,5 +108,9 @@ class SettingsRepository @Inject constructor(
         val ZONE_TOP = floatPreferencesKey("zone_top")
         val ZONE_RIGHT = floatPreferencesKey("zone_right")
         val ZONE_BOTTOM = floatPreferencesKey("zone_bottom")
+        val CART_ZONE_LEFT = floatPreferencesKey("cart_zone_left")
+        val CART_ZONE_TOP = floatPreferencesKey("cart_zone_top")
+        val CART_ZONE_RIGHT = floatPreferencesKey("cart_zone_right")
+        val CART_ZONE_BOTTOM = floatPreferencesKey("cart_zone_bottom")
     }
 }

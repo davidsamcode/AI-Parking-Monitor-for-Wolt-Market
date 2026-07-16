@@ -14,4 +14,13 @@ data class AlertEventEntity(
     val timeToAlertMs: Long,
     val dismissed: Boolean,
     val markedCorrect: Boolean?,
+    val triggerReason: String?,
+    val motionScore: Float?,
+    val largestChangedRegionScore: Float?,
+    val clearThreshold: Float?,
+    val leftoverThreshold: Float?,
+    val changedRegionLeft: Float?,
+    val changedRegionTop: Float?,
+    val changedRegionRight: Float?,
+    val changedRegionBottom: Float?,
 )
