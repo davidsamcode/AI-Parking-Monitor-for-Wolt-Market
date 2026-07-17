@@ -9,6 +9,13 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.camera.video.FileOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -26,7 +33,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -44,10 +54,11 @@ import com.aipackingmonitor.domain.model.MonitoringState
 import com.aipackingmonitor.domain.model.MonitoringZone
 import com.aipackingmonitor.domain.model.NormalizedRect
 import com.aipackingmonitor.vision.FrameDifferencingDetector
-import kotlin.math.max
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.max
 
 @Composable
 fun CameraPermissionGate(
@@ -98,12 +109,16 @@ fun CameraPermissionGate(
     }
 }
 
+private const val AUDIT_VIDEO_DIRECTORY = "audit-videos"
+
 @Composable
 fun CameraPreviewPanel(
     uiState: MonitoringUiState,
     onDetection: (DetectionResult) -> Unit,
     onReferenceCaptured: (String, Boolean) -> Unit,
     onReferenceAvailabilityChanged: (String, Boolean) -> Unit,
+    onAuditRecordingStarted: (String, String, Long) -> Unit,
+    onAuditRecordingFinalized: (String, Long, Long?, Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val zoneStates = uiState.cameraZoneStates()
@@ -121,6 +136,9 @@ fun CameraPreviewPanel(
             onDetection = onDetection,
             onReferenceCaptured = onReferenceCaptured,
             onReferenceAvailabilityChanged = onReferenceAvailabilityChanged,
+            auditRecordingRequest = uiState.auditRecordingRequest,
+            onAuditRecordingStarted = onAuditRecordingStarted,
+            onAuditRecordingFinalized = onAuditRecordingFinalized,
         )
         zoneStates.forEach { zoneState ->
             val setupActive = uiState.areaSetupActive &&
@@ -150,6 +168,9 @@ private fun CameraFeed(
     onDetection: (DetectionResult) -> Unit,
     onReferenceCaptured: (String, Boolean) -> Unit,
     onReferenceAvailabilityChanged: (String, Boolean) -> Unit,
+    auditRecordingRequest: AuditRecordingRequest?,
+    onAuditRecordingStarted: (String, String, Long) -> Unit,
+    onAuditRecordingFinalized: (String, Long, Long?, Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -161,6 +182,14 @@ private fun CameraFeed(
     }
     val detector = remember { FrameDifferencingDetector(context) }
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+    val recorder = remember {
+        Recorder.Builder()
+            .setQualitySelector(QualitySelector.from(Quality.SD))
+            .build()
+    }
+    val videoCapture = remember { VideoCapture.withOutput(recorder) }
+    var videoCaptureReady by remember { mutableStateOf(false) }
+    var activeAuditRecording by remember { mutableStateOf<ActiveAuditRecording?>(null) }
     val zoneRequestsRef = remember { AtomicReference(zoneRequests) }
     val handledCaptureRequests = remember { ConcurrentHashMap<String, Long>() }
     val mainExecutor = remember(context) { ContextCompat.getMainExecutor(context) }
@@ -171,6 +200,65 @@ private fun CameraFeed(
             onReferenceAvailabilityChanged(
                 request.zone.id,
                 detector.hasReference(request.zone),
+            )
+        }
+    }
+
+    LaunchedEffect(auditRecordingRequest, videoCaptureReady) {
+        if (!videoCaptureReady) return@LaunchedEffect
+
+        val currentRecording = activeAuditRecording
+        if (auditRecordingRequest == null) {
+            currentRecording?.recording?.stop()
+            activeAuditRecording = null
+            return@LaunchedEffect
+        }
+
+        if (currentRecording?.id == auditRecordingRequest.id) return@LaunchedEffect
+
+        currentRecording?.recording?.stop()
+        activeAuditRecording = null
+
+        val file = createAuditVideoFile(context.filesDir, auditRecordingRequest)
+        val outputOptions = FileOutputOptions.Builder(file).build()
+        runCatching {
+            val recording = videoCapture.output
+                .prepareRecording(context, outputOptions)
+                .start(mainExecutor) { event ->
+                    when (event) {
+                        is VideoRecordEvent.Start -> {
+                            onAuditRecordingStarted(
+                                auditRecordingRequest.id,
+                                file.absolutePath,
+                                auditRecordingRequest.startedAtMillis,
+                            )
+                        }
+
+                        is VideoRecordEvent.Finalize -> {
+                            val failed = event.hasError()
+                            if (failed) {
+                                runCatching { file.delete() }
+                            }
+                            onAuditRecordingFinalized(
+                                auditRecordingRequest.id,
+                                System.currentTimeMillis(),
+                                file.takeIf { it.exists() }?.length(),
+                                failed,
+                            )
+                        }
+                    }
+                }
+            activeAuditRecording = ActiveAuditRecording(
+                id = auditRecordingRequest.id,
+                file = file,
+                recording = recording,
+            )
+        }.onFailure {
+            onAuditRecordingFinalized(
+                auditRecordingRequest.id,
+                System.currentTimeMillis(),
+                null,
+                true,
             )
         }
     }
@@ -225,13 +313,18 @@ private fun CameraFeed(
                     lifecycleOwner,
                     CameraSelector.DEFAULT_BACK_CAMERA,
                     preview,
+                    videoCapture,
                     analysis,
                 )
+                videoCaptureReady = true
             },
             mainExecutor,
         )
 
         onDispose {
+            activeAuditRecording?.recording?.stop()
+            activeAuditRecording = null
+            videoCaptureReady = false
             try {
                 cameraProviderFuture.get().unbindAll()
             } catch (_: Exception) {
@@ -244,6 +337,21 @@ private fun CameraFeed(
         modifier = Modifier.fillMaxSize(),
         factory = { previewView },
     )
+}
+
+private data class ActiveAuditRecording(
+    val id: String,
+    val file: File,
+    val recording: Recording,
+)
+
+private fun createAuditVideoFile(
+    filesDir: File,
+    request: AuditRecordingRequest,
+): File {
+    val directory = File(filesDir, AUDIT_VIDEO_DIRECTORY).apply { mkdirs() }
+    val shortId = request.id.take(8)
+    return File(directory, "session-${request.startedAtMillis}-$shortId.mp4")
 }
 
 private data class CameraZoneFrameState(

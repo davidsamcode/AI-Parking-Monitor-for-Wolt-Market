@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
@@ -53,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aipackingmonitor.data.AlertEventEntity
+import com.aipackingmonitor.data.AuditVideoEntity
 import com.aipackingmonitor.domain.model.MonitoringState
 import com.aipackingmonitor.domain.model.MonitoringZone
 import com.aipackingmonitor.domain.model.NormalizedRect
@@ -84,6 +86,9 @@ fun MonitoringRoute(
         onAlertDelayChanged = viewModel::updateAlertDelay,
         onAlarmVolumeChanged = viewModel::updateAlarmVolume,
         onVibrationChanged = viewModel::updateVibrationEnabled,
+        onAuditVideoEnabledChanged = viewModel::updateAuditVideoEnabled,
+        onAuditRecordingStarted = viewModel::onAuditRecordingStarted,
+        onAuditRecordingFinalized = viewModel::onAuditRecordingFinalized,
         onAddTableZone = viewModel::addAdditionalTableZone,
         onAddCartZone = viewModel::addAdditionalCartZone,
         onRemoveAdditionalZone = viewModel::removeAdditionalZone,
@@ -126,6 +131,9 @@ private fun MonitoringScreen(
     onAlertDelayChanged: (Long) -> Unit,
     onAlarmVolumeChanged: (Int) -> Unit,
     onVibrationChanged: (Boolean) -> Unit,
+    onAuditVideoEnabledChanged: (Boolean) -> Unit,
+    onAuditRecordingStarted: (String, String, Long) -> Unit,
+    onAuditRecordingFinalized: (String, Long, Long?, Boolean) -> Unit,
     onAddTableZone: () -> Unit,
     onAddCartZone: () -> Unit,
     onRemoveAdditionalZone: (String) -> Unit,
@@ -176,6 +184,8 @@ private fun MonitoringScreen(
                         onDetection = onDetection,
                         onReferenceCaptured = onReferenceCaptured,
                         onReferenceAvailabilityChanged = onReferenceAvailabilityChanged,
+                        onAuditRecordingStarted = onAuditRecordingStarted,
+                        onAuditRecordingFinalized = onAuditRecordingFinalized,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
@@ -225,9 +235,11 @@ private fun MonitoringScreen(
                 onAlertDelayChanged = onAlertDelayChanged,
                 onAlarmVolumeChanged = onAlarmVolumeChanged,
                 onVibrationChanged = onVibrationChanged,
+                onAuditVideoEnabledChanged = onAuditVideoEnabledChanged,
             )
 
             EventHistory(events = uiState.recentEvents)
+            AuditVideoHistory(videos = uiState.recentAuditVideos)
         }
     }
 }
@@ -848,6 +860,7 @@ private fun SettingsPanel(
     onAlertDelayChanged: (Long) -> Unit,
     onAlarmVolumeChanged: (Int) -> Unit,
     onVibrationChanged: (Boolean) -> Unit,
+    onAuditVideoEnabledChanged: (Boolean) -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -920,6 +933,39 @@ private fun SettingsPanel(
                 Switch(
                     checked = uiState.settings.vibrationEnabled,
                     onCheckedChange = onVibrationChanged,
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Videocam,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.secondary,
+                )
+                Column(
+                    modifier = Modifier
+                        .padding(start = 8.dp)
+                        .weight(1f),
+                ) {
+                    Text(
+                        text = "Audit video",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(
+                        text = if (uiState.auditRecordingActive) {
+                            "Recording active"
+                        } else {
+                            "Stored locally for 48 hours"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = uiState.settings.auditVideoEnabled,
+                    onCheckedChange = onAuditVideoEnabledChanged,
                 )
             }
         }
@@ -1047,6 +1093,89 @@ private fun EventRow(event: AlertEventEntity) {
     }
 }
 
+@Composable
+private fun AuditVideoHistory(videos: List<AuditVideoEntity>) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = "Audit videos",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            if (videos.isEmpty()) {
+                Text(
+                    text = "No audit videos saved.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                videos.forEach { video ->
+                    AuditVideoRow(video)
+                }
+            }
+        }
+    }
+    Spacer(modifier = Modifier.height(12.dp))
+}
+
+@Composable
+private fun AuditVideoRow(video: AuditVideoEntity) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Surface(
+            color = if (video.alertTriggered) {
+                Color(0xFFE53935).copy(alpha = 0.14f)
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+            shape = RoundedCornerShape(8.dp),
+        ) {
+            Icon(
+                modifier = Modifier.padding(8.dp),
+                imageVector = Icons.Default.Videocam,
+                contentDescription = null,
+                tint = if (video.alertTriggered) {
+                    Color(0xFFE53935)
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            )
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = video.zoneNames.ifBlank { "Audit session" },
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = "${time(video.startedAtMillis)} - ${auditVideoStatus(video)}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = "Expires ${time(video.expiresAtMillis)} - ${fileSize(video.fileSizeBytes)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
 private fun statusColor(state: MonitoringState): Color =
     when (state) {
         MonitoringState.LeftoverAlert -> Color(0xFFE53935)
@@ -1102,6 +1231,23 @@ private fun duration(ms: Long): String {
 
 private fun time(ms: Long): String =
     SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(ms))
+
+private fun auditVideoStatus(video: AuditVideoEntity): String =
+    when {
+        video.failed -> "failed"
+        !video.finalized -> "recording"
+        video.alertTriggered -> "alert recorded"
+        else -> "saved"
+    }
+
+private fun fileSize(bytes: Long?): String {
+    val value = bytes ?: return "size pending"
+    return if (value < 1_048_576L) {
+        String.format(Locale.US, "%.1f KB", value / 1024f)
+    } else {
+        String.format(Locale.US, "%.1f MB", value / 1_048_576f)
+    }
+}
 
 private const val MIN_ZONE_SIZE = 0.06f
 private const val MAX_ADDITIONAL_ZONES = 4

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.aipackingmonitor.data.AlertEventEntity
 import com.aipackingmonitor.data.AlertEventRepository
+import com.aipackingmonitor.data.AuditVideoRepository
 import com.aipackingmonitor.data.ConfiguredMonitoringZone
 import com.aipackingmonitor.data.PilotSettings
 import com.aipackingmonitor.data.SettingsRepository
@@ -36,6 +37,7 @@ import kotlinx.coroutines.launch
 class MonitoringViewModel @Inject constructor(
     private val stateMachine: MonitoringStateMachine,
     private val alertEventRepository: AlertEventRepository,
+    private val auditVideoRepository: AuditVideoRepository,
     private val settingsRepository: SettingsRepository,
     private val alertController: AlertController,
 ) : ViewModel() {
@@ -44,6 +46,10 @@ class MonitoringViewModel @Inject constructor(
 
     private var alertLoopJob: Job? = null
     private val activeEventIds = mutableMapOf<String, String>()
+    private val activeAuditZoneNames = mutableMapOf<String, String>()
+    private var auditSessionId: String? = null
+    private var auditSessionStartedAtMillis: Long? = null
+    private var auditSessionAlertTriggered: Boolean = false
 
     init {
         viewModelScope.launch {
@@ -95,6 +101,21 @@ class MonitoringViewModel @Inject constructor(
                 .collectLatest { events ->
                     _uiState.update { it.copy(recentEvents = events.take(5)) }
                 }
+        }
+
+        viewModelScope.launch {
+            auditVideoRepository.observeRecentVideos()
+                .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+                .collectLatest { videos ->
+                    _uiState.update { it.copy(recentAuditVideos = videos) }
+                }
+        }
+
+        viewModelScope.launch {
+            while (true) {
+                auditVideoRepository.cleanupExpired(now())
+                delay(AUDIT_CLEANUP_INTERVAL_MS)
+            }
         }
     }
 
@@ -284,6 +305,7 @@ class MonitoringViewModel @Inject constructor(
         val now = now()
         if (current.monitoringEnabled) {
             stopAllActiveAlerts(now, dismissed = true, markedCorrect = null)
+            stopAuditRecordingRequest()
             _uiState.update {
                 it.copy(
                     monitoringEnabled = false,
@@ -486,6 +508,13 @@ class MonitoringViewModel @Inject constructor(
         viewModelScope.launch { settingsRepository.updateVibrationEnabled(enabled) }
     }
 
+    fun updateAuditVideoEnabled(enabled: Boolean) {
+        if (!enabled) {
+            stopAuditRecordingRequest()
+        }
+        viewModelScope.launch { settingsRepository.updateAuditVideoEnabled(enabled) }
+    }
+
     fun addAdditionalTableZone() {
         addAdditionalZone(ZoneType.PackingTable)
     }
@@ -498,6 +527,7 @@ class MonitoringViewModel @Inject constructor(
         val current = _uiState.value
         val zoneState = current.additionalZones.firstOrNull { it.zone.id == zoneId } ?: return
         stopActiveAlert(zoneId, now(), dismissed = true, markedCorrect = null)
+        removeAuditZone(zoneId)
         viewModelScope.launch {
             settingsRepository.removeAdditionalZone(zoneId)
             _uiState.update {
@@ -551,6 +581,7 @@ class MonitoringViewModel @Inject constructor(
 
     fun startAreaSetup() {
         val current = _uiState.value
+        stopAuditRecordingRequest()
         _uiState.update {
             it.copy(
                 areaSetupActive = true,
@@ -572,6 +603,7 @@ class MonitoringViewModel @Inject constructor(
 
     fun startCartAreaSetup() {
         val current = _uiState.value
+        stopAuditRecordingRequest()
         _uiState.update {
             it.copy(
                 areaSetupActive = true,
@@ -594,6 +626,7 @@ class MonitoringViewModel @Inject constructor(
     fun startAdditionalAreaSetup(zoneId: String) {
         val current = _uiState.value
         val zoneState = current.additionalZones.firstOrNull { it.zone.id == zoneId } ?: return
+        stopAuditRecordingRequest()
         _uiState.update {
             it.copy(
                 areaSetupActive = true,
@@ -731,6 +764,7 @@ class MonitoringViewModel @Inject constructor(
 
     override fun onCleared() {
         alertLoopJob?.cancel()
+        stopAuditRecordingRequest()
         activeEventIds.clear()
         alertController.stop()
         super.onCleared()
@@ -743,12 +777,146 @@ class MonitoringViewModel @Inject constructor(
         settings: PilotSettings,
         now: Long,
     ) {
+        handleAuditRecordingTransition(previous, next, zone, settings, now)
+
         if (previous.state != MonitoringState.LeftoverAlert && next.state == MonitoringState.LeftoverAlert) {
+            markAuditAlertTriggered()
             startAlert(next, zone, settings, now)
         }
 
         if (previous.state == MonitoringState.LeftoverAlert && next.state != MonitoringState.LeftoverAlert) {
             stopActiveAlert(zone.id, now, dismissed = false, markedCorrect = null)
+        }
+    }
+
+    private fun handleAuditRecordingTransition(
+        previous: MonitoringSnapshot,
+        next: MonitoringSnapshot,
+        zone: MonitoringZone,
+        settings: PilotSettings,
+        now: Long,
+    ) {
+        if (!settings.auditVideoEnabled) return
+
+        if (next.state.isAuditRecordingState()) {
+            activeAuditZoneNames[zone.id] = zone.name
+        } else if (previous.state.isAuditRecordingState() || next.state.isAuditStopState()) {
+            activeAuditZoneNames.remove(zone.id)
+        }
+
+        syncAuditRecordingRequest(now)
+    }
+
+    private fun syncAuditRecordingRequest(now: Long) {
+        if (activeAuditZoneNames.isEmpty()) {
+            stopAuditRecordingRequest()
+            return
+        }
+
+        val sessionId = auditSessionId ?: UUID.randomUUID().toString().also {
+            auditSessionId = it
+            auditSessionStartedAtMillis = now
+            auditSessionAlertTriggered = false
+        }
+        val startedAt = auditSessionStartedAtMillis ?: now.also {
+            auditSessionStartedAtMillis = it
+        }
+        val zoneIds = activeAuditZoneNames.keys.toList()
+        val zoneNames = activeAuditZoneNames.values.toList()
+        val request = AuditRecordingRequest(
+            id = sessionId,
+            startedAtMillis = startedAt,
+            zoneIds = zoneIds,
+            zoneNames = zoneNames,
+        )
+        _uiState.update { it.copy(auditRecordingRequest = request) }
+        viewModelScope.launch {
+            auditVideoRepository.updateZones(
+                id = sessionId,
+                zoneIds = zoneIds,
+                zoneNames = zoneNames,
+            )
+        }
+    }
+
+    private fun stopAuditRecordingRequest() {
+        activeAuditZoneNames.clear()
+        auditSessionId = null
+        auditSessionStartedAtMillis = null
+        auditSessionAlertTriggered = false
+        _uiState.update { it.copy(auditRecordingRequest = null) }
+    }
+
+    private fun removeAuditZone(zoneId: String) {
+        if (activeAuditZoneNames.remove(zoneId) != null) {
+            syncAuditRecordingRequest(now())
+        }
+    }
+
+    private fun markAuditAlertTriggered() {
+        val sessionId = auditSessionId ?: return
+        auditSessionAlertTriggered = true
+        viewModelScope.launch {
+            auditVideoRepository.markAlertTriggered(sessionId)
+        }
+    }
+
+    fun onAuditRecordingStarted(
+        id: String,
+        filePath: String,
+        startedAtMillis: Long,
+    ) {
+        val request = _uiState.value.auditRecordingRequest ?: return
+        if (request.id != id) return
+
+        viewModelScope.launch {
+            auditVideoRepository.recordStarted(
+                id = id,
+                filePath = filePath,
+                startedAtMillis = startedAtMillis,
+                zoneIds = request.zoneIds,
+                zoneNames = request.zoneNames,
+            )
+            if (auditSessionAlertTriggered) {
+                auditVideoRepository.markAlertTriggered(id)
+            }
+            _uiState.update {
+                it.copy(
+                    auditRecordingActive = true,
+                    lastMessage = "Audit recording started.",
+                )
+            }
+        }
+    }
+
+    fun onAuditRecordingFinalized(
+        id: String,
+        endedAtMillis: Long,
+        fileSizeBytes: Long?,
+        failed: Boolean,
+    ) {
+        viewModelScope.launch {
+            auditVideoRepository.finish(
+                id = id,
+                endedAtMillis = endedAtMillis,
+                fileSizeBytes = fileSizeBytes,
+                failed = failed,
+            )
+            _uiState.update {
+                if (it.auditRecordingRequest?.id != null && it.auditRecordingRequest.id != id) {
+                    it
+                } else {
+                    it.copy(
+                        auditRecordingActive = false,
+                        lastMessage = if (failed) {
+                            "Audit recording failed."
+                        } else {
+                            "Audit recording saved for 48 hours."
+                        },
+                    )
+                }
+            }
+            auditVideoRepository.cleanupExpired(now())
         }
     }
 
@@ -1010,9 +1178,23 @@ class MonitoringViewModel @Inject constructor(
 
     private fun now(): Long = System.currentTimeMillis()
 
+    private fun MonitoringState.isAuditRecordingState(): Boolean =
+        this == MonitoringState.PackingActive ||
+            this == MonitoringState.BagRemovedCandidate ||
+            this == MonitoringState.PostPackScan ||
+            this == MonitoringState.LeftoverAlert
+
+    private fun MonitoringState.isAuditStopState(): Boolean =
+        this == MonitoringState.EmptyTable ||
+            this == MonitoringState.ClearReset ||
+            this == MonitoringState.NeedsReference ||
+            this == MonitoringState.SystemUnavailable ||
+            this == MonitoringState.Paused
+
     private companion object {
         const val MIN_ZONE_SIZE = 0.06f
         const val MAX_ADDITIONAL_ZONES = 4
+        const val AUDIT_CLEANUP_INTERVAL_MS = 60L * 60L * 1_000L
         const val CART_AWAY_OCCUPANCY_THRESHOLD = 0.35f
         const val CART_AWAY_REGION_THRESHOLD = 0.28f
     }

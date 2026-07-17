@@ -29,6 +29,7 @@ class SettingsRepository @Inject constructor(
                 alertDelayMs = preferences[ALERT_DELAY_MS] ?: 3_000,
                 alarmVolumePercent = preferences[ALARM_VOLUME] ?: 80,
                 vibrationEnabled = preferences[VIBRATION_ENABLED] ?: true,
+                auditVideoEnabled = preferences[AUDIT_VIDEO_ENABLED] ?: false,
                 zoneLeft = preferences[ZONE_LEFT] ?: 0.12f,
                 zoneTop = preferences[ZONE_TOP] ?: 0.18f,
                 zoneRight = preferences[ZONE_RIGHT] ?: 0.88f,
@@ -59,6 +60,10 @@ class SettingsRepository @Inject constructor(
 
     suspend fun updateVibrationEnabled(enabled: Boolean) {
         context.settingsDataStore.edit { it[VIBRATION_ENABLED] = enabled }
+    }
+
+    suspend fun updateAuditVideoEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[AUDIT_VIDEO_ENABLED] = enabled }
     }
 
     suspend fun updateZoneBounds(
@@ -242,5 +247,6 @@ class SettingsRepository @Inject constructor(
         val CART_ZONE_RIGHT = floatPreferencesKey("cart_zone_right")
         val CART_ZONE_BOTTOM = floatPreferencesKey("cart_zone_bottom")
         val ADDITIONAL_ZONES = stringPreferencesKey("additional_zones")
+        val AUDIT_VIDEO_ENABLED = booleanPreferencesKey("audit_video_enabled")
     }
 }

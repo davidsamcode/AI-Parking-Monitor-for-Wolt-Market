@@ -4,7 +4,9 @@ import android.content.Context
 import androidx.room.Room
 import com.aipackingmonitor.data.AlertEventRepository
 import com.aipackingmonitor.data.AppDatabase
+import com.aipackingmonitor.data.AuditVideoRepository
 import com.aipackingmonitor.data.RoomAlertEventRepository
+import com.aipackingmonitor.data.RoomAuditVideoRepository
 import com.aipackingmonitor.device.AlertController
 import com.aipackingmonitor.device.AndroidAlertController
 import com.aipackingmonitor.domain.MonitoringStateMachine
@@ -29,12 +31,19 @@ object AppModule {
             AppDatabase::class.java,
             "packing-monitor.db",
         )
-            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3)
+            .addMigrations(
+                AppDatabase.MIGRATION_1_2,
+                AppDatabase.MIGRATION_2_3,
+                AppDatabase.MIGRATION_3_4,
+            )
             .fallbackToDestructiveMigration()
             .build()
 
     @Provides
     fun provideAlertEventDao(database: AppDatabase) = database.alertEventDao()
+
+    @Provides
+    fun provideAuditVideoDao(database: AppDatabase) = database.auditVideoDao()
 
     @Provides
     fun provideMonitoringStateMachine(): MonitoringStateMachine = MonitoringStateMachine()
@@ -47,6 +56,11 @@ abstract class BindingModule {
     abstract fun bindAlertEventRepository(
         repository: RoomAlertEventRepository,
     ): AlertEventRepository
+
+    @Binds
+    abstract fun bindAuditVideoRepository(
+        repository: RoomAuditVideoRepository,
+    ): AuditVideoRepository
 
     @Binds
     abstract fun bindAlertController(

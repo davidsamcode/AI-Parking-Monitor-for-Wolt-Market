@@ -1,6 +1,7 @@
 package com.aipackingmonitor.ui.monitoring
 
 import com.aipackingmonitor.data.AlertEventEntity
+import com.aipackingmonitor.data.AuditVideoEntity
 import com.aipackingmonitor.data.PilotSettings
 import com.aipackingmonitor.domain.model.MonitoringSnapshot
 import com.aipackingmonitor.domain.model.MonitoringZone
@@ -23,6 +24,7 @@ data class MonitoringUiState(
         averageResponseTimeMs = 0,
     ),
     val recentEvents: List<AlertEventEntity> = emptyList(),
+    val recentAuditVideos: List<AuditVideoEntity> = emptyList(),
     val cameraPermissionGranted: Boolean = false,
     val monitoringEnabled: Boolean = false,
     val referenceReady: Boolean = false,
@@ -35,6 +37,8 @@ data class MonitoringUiState(
     val areaSetupZoneId: String? = null,
     val draftZoneBounds: NormalizedRect = DefaultPackingZone.bounds,
     val cartPresent: Boolean = false,
+    val auditRecordingRequest: AuditRecordingRequest? = null,
+    val auditRecordingActive: Boolean = false,
     val awaitingFeedbackEventId: String? = null,
     val lastMessage: String? = null,
 )
@@ -51,6 +55,13 @@ data class MonitoredZoneUiState(
     val referenceReady: Boolean = false,
     val referenceCaptureRequest: Long = 0,
     val present: Boolean = zone.type != ZoneType.Tote,
+)
+
+data class AuditRecordingRequest(
+    val id: String,
+    val startedAtMillis: Long,
+    val zoneIds: List<String>,
+    val zoneNames: List<String>,
 )
 
 val DefaultPackingZone = MonitoringZone(
