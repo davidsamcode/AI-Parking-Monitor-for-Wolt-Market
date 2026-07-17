@@ -1,22 +1,74 @@
 # AI Packing Monitor
 
-Native Android pilot app for monitoring a packing table with the phone rear camera. The first release is local-only: it captures an empty reference frame, watches one configured zone, alerts on stable visual differences, and records pilot alert results on the device.
+Android vision app that detects items left behind on packing tables, carts, or baskets and alerts staff before an order is dispatched.
 
-## What is implemented
+The app is built for an on-device pilot workflow. It uses the phone rear camera, captures empty references for configured zones, waits until packing activity stops, compares the stable camera view against the reference, and alerts only when a possible added leftover object remains.
 
-- Kotlin Android app with Jetpack Compose UI.
-- CameraX preview and `ImageAnalysis` using keep-latest backpressure.
-- Deterministic monitoring state machine in a separate `domain` module.
-- Empty-reference capture with app-private `reference.jpg` and `reference-luma.bin` persistence.
-- Workflow-aware monitoring: packing activity suppresses alerts, a 3-second quiet period starts post-pack scanning, and only then can the app alert.
-- Hysteresis, stopped-work confirmation, post-pack scan delay, and automatic clear reset.
-- Packing-area crop setup with persisted normalized bounds.
-- Adjustable post-pack scan wait from 3 to 60 seconds.
-- Audible tone and vibration alert loop.
-- Local Room event log with pilot feedback.
-- DataStore-backed sensitivity, delay, volume, and vibration settings.
-- Hilt dependency injection.
-- Local-only privacy posture: no accounts, backend, analytics, video upload, microphone, contacts, or location permissions.
+## Current Features
+
+- Native Android app written in Kotlin with Jetpack Compose.
+- CameraX preview, image analysis, and audit video recording.
+- OpenCV first-layer computer vision for frame differencing, thresholding, morphology cleanup, and changed-region detection.
+- Optional TensorFlow Lite second checker for local AI verification when a bundled model is provided.
+- Empty reference capture per monitored zone.
+- Croppable packing table and cart areas with saved normalized bounds.
+- Main table and cart monitoring, plus up to 4 additional table/cart zones.
+- Zone labels on the camera feed, such as `Table 1`, `Cart 1`, `Table 2`, and `Cart 2`.
+- Motion-aware packing workflow: alerts are suppressed while staff are packing.
+- Adjustable post-packing quiet time from 3 to 60 seconds.
+- Alert loop that continues until the leftover is removed or movement starts again.
+- Red suspected-region overlay around the changed area during leftover alerts.
+- Alert reason logging with occupancy, motion, region size, added/removed scores, verifier decision, and confidence.
+- Local Room history for alert events, pilot feedback, and audit video records.
+- Optional audit videos saved privately on device for 48 hours, with an in-app `Watch` action.
+- DataStore-backed settings for thresholds, alert delay, alarm volume, vibration, audit video, and zone bounds.
+- Keep-screen-awake behavior while the app is active.
+- Local-only privacy posture: no backend, account, analytics, upload, cloud AI, microphone, contacts, or location access.
+
+## Tech Stack
+
+- Kotlin
+- Android SDK
+- Jetpack Compose
+- CameraX
+- OpenCV
+- TensorFlow Lite
+- Room
+- DataStore
+- Hilt
+- Gradle Kotlin DSL
+
+## Vision Logic
+
+The detector keeps an empty luma reference for each configured zone. During monitoring, each camera frame is sampled inside the zone bounds.
+
+OpenCV is the first layer. It compares the current frame against the saved reference, builds a cleaned change mask, finds the largest changed region, and classifies the change as an added object, removed reference object, lighting change, mixed change, or no meaningful change.
+
+TensorFlow Lite is the second checker. It is wired to load this local asset when available:
+
+```text
+app/src/main/assets/leftover_verifier.tflite
+```
+
+If no model is bundled, the app continues with the OpenCV/rule-based verifier. If a model is bundled, it can confirm or veto an added-object alert locally on the phone.
+
+## Packing Workflow
+
+1. Mount the phone with a stable rear-camera view of the packing table and cart area.
+2. Grant camera permission.
+3. Set the table and cart areas so the app monitors only the practical packing zones.
+4. Clear the selected zone and capture an empty reference.
+5. Start monitoring.
+6. Staff brings picked items and bags into the zone. The app enters packing activity and suppresses alerts.
+7. When movement stops, the app waits for the configured delay, from 3 to 60 seconds.
+8. The stable zone is compared against the empty reference.
+9. If the view matches the reference, the app resets for the next packing task.
+10. If a possible added leftover object remains, the app alerts and highlights the suspected area.
+11. If movement starts again, the alert stops and the app treats it as renewed packing activity before scanning again.
+
+## Audit Video
+
+Audit video can be enabled in settings. When enabled, recording starts during an active packing session and stops when the table/cart returns to a clear state. Videos are stored in app-private storage, listed in the app, playable through the `Watch` button, and deleted automatically after 48 hours.
 
 ## Build
 
@@ -35,27 +87,14 @@ The debug APK is generated at:
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Pilot workflow
-
-1. Mount the phone with a stable rear-camera view of the packing table.
-2. Grant camera permission.
-3. Tap `Set area`, adjust the blue crop rectangle so it covers only the packing area, then save.
-4. Clear the cropped table area and tap `Capture empty`.
-5. Start monitoring.
-6. Staff brings items and a bag into the zone. The app enters `Packing active` and suppresses alerts.
-7. When motion stops for 3 seconds, the app scans the stable table against the saved empty reference.
-8. If the table matches the reference, the app resets for the next packing cycle.
-9. If a stable difference remains, the app alerts for a possible leftover item.
-10. Dismissed alerts can be marked as correct or false alarm for pilot metrics.
-
 ## Architecture
 
-The important separation is:
+The app is split around three responsibilities:
 
 ```text
-Seeing: CameraX frame analyzer and detector observations.
-Deciding: Workflow state machine and clearance policy.
-Presenting: Compose UI, local alerts, settings, and pilot metrics.
+Seeing: CameraX frame analysis, OpenCV change detection, optional TensorFlow Lite verification.
+Deciding: Domain state machine, movement gating, timing, thresholds, and clear/leftover decisions.
+Presenting: Compose UI, camera overlays, alert loop, settings, local history, and audit videos.
 ```
 
-The current detector is intentionally simple and replaceable. It reports occupancy, motion, and largest changed-region size. A future OpenCV or TensorFlow Lite engine should implement the same `DetectionResult` contract and leave the workflow state machine unchanged.
+The state machine is intentionally separate from the detector so the vision engine can improve without changing the packing workflow.
