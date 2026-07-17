@@ -1,5 +1,9 @@
 package com.aipackingmonitor.ui.monitoring
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -51,6 +55,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aipackingmonitor.data.AlertEventEntity
@@ -59,6 +64,7 @@ import com.aipackingmonitor.domain.model.MonitoringState
 import com.aipackingmonitor.domain.model.MonitoringZone
 import com.aipackingmonitor.domain.model.NormalizedRect
 import com.aipackingmonitor.domain.model.ZoneType
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -1127,6 +1133,8 @@ private fun AuditVideoHistory(videos: List<AuditVideoEntity>) {
 
 @Composable
 private fun AuditVideoRow(video: AuditVideoEntity) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val playable = video.finalized && !video.failed && video.fileSizeBytes != null
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -1172,6 +1180,52 @@ private fun AuditVideoRow(video: AuditVideoEntity) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+        }
+        OutlinedButton(
+            shape = RoundedCornerShape(8.dp),
+            enabled = playable,
+            onClick = { openAuditVideo(context, video) },
+        ) {
+            Icon(Icons.Default.PlayArrow, contentDescription = null)
+            Text(
+                modifier = Modifier.padding(start = 6.dp),
+                text = "Watch",
+            )
+        }
+    }
+}
+
+private fun openAuditVideo(context: Context, video: AuditVideoEntity) {
+    val file = File(video.filePath)
+    if (!file.exists()) {
+        Toast.makeText(context, "Video file was not found.", Toast.LENGTH_SHORT).show()
+        return
+    }
+
+    val uri = FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        file,
+    )
+    val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, "video/mp4")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+
+    runCatching {
+        context.startActivity(viewIntent)
+    }.onFailure { error ->
+        if (error is ActivityNotFoundException) {
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "video/mp4"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(
+                Intent.createChooser(shareIntent, "Open audit video"),
+            )
+        } else {
+            Toast.makeText(context, "Could not open video.", Toast.LENGTH_SHORT).show()
         }
     }
 }
