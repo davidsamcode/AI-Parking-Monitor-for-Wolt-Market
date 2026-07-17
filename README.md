@@ -72,7 +72,19 @@ Audit video can be enabled in settings. When enabled, recording starts during an
 
 ## Build
 
-This machine has the Android SDK and Android Studio JBR installed. If `java` is not on PATH, run Gradle with:
+### Requirements
+
+- A Windows, macOS, or Linux computer that can run [Android Studio](https://developer.android.com/studio).
+- [Android Studio](https://developer.android.com/studio) installed. This is the easiest way to get the Android SDK, SDK Manager, emulator tools, and the bundled JetBrains Runtime.
+- Android SDK Platform 36 installed through Android Studio SDK Manager. The project currently uses `compileSdk = 36`.
+- Android SDK Platform-Tools and a compatible Android SDK Build-Tools package. These can be installed from Android Studio SDK Manager or with the [sdkmanager command-line tool](https://developer.android.com/tools/sdkmanager).
+- JDK 17. The bundled Android Studio JBR works, so a separate Java install is not required if you point `JAVA_HOME` to it.
+- A real Android phone is recommended for testing because the app depends on the rear camera. The app supports Android 8.0/API 26 and newer.
+- USB debugging or wireless debugging enabled if you want to install directly from Android Studio or ADB. See Android's guide to [run apps on a hardware device](https://developer.android.com/studio/run/device.html).
+
+No separate Gradle installation is needed because this repo includes the Gradle wrapper.
+
+If `java` is not on PATH, run Gradle with:
 
 ```powershell
 $env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'
