@@ -9,7 +9,9 @@ dataStore = "1.1.1"
 hilt = "2.52"
 hiltNavigation = "1.2.0"
 lifecycle = "2.8.7"
+opencv = "4.10.0"
 room = "2.6.1"
+tensorflowLite = "2.16.1"
 junit = "4.13.2"
 
 [libraries]
@@ -38,6 +40,8 @@ hilt-android = { module = "com.google.dagger:hilt-android", version.ref = "hilt"
 hilt-compiler = { module = "com.google.dagger:hilt-compiler", version.ref = "hilt" }
 junit = { module = "junit:junit", version.ref = "junit" }
 kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test" }
+opencv = { module = "org.opencv:opencv", version.ref = "opencv" }
+tensorflow-lite = { module = "org.tensorflow:tensorflow-lite", version.ref = "tensorflowLite" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

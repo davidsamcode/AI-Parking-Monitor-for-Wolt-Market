@@ -1,6 +1,7 @@
 package com.aipackingmonitor.vision
 
 import android.content.Context
+import android.content.res.AssetFileDescriptor
 import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.YuvImage
@@ -17,13 +18,27 @@ import java.io.DataOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.MappedByteBuffer
+import java.nio.channels.FileChannel
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
+import org.opencv.android.OpenCVLoader
+import org.opencv.core.CvType
+import org.opencv.core.Mat
+import org.opencv.core.MatOfPoint
+import org.opencv.core.Size
+import org.opencv.imgproc.Imgproc
+import org.tensorflow.lite.DataType
+import org.tensorflow.lite.Interpreter
 
 class FrameDifferencingDetector(context: Context) {
     private val referenceStore = ReferenceStore(context.applicationContext)
+    private val openCvAnalyzer = OpenCvChangeAnalyzer()
+    private val tensorFlowLiteVerifier = TensorFlowLiteChangeVerifier(context.applicationContext)
     private val references = mutableMapOf<String, LumaReference?>()
     private val previousSamples = mutableMapOf<String, IntArray>()
 
@@ -103,14 +118,19 @@ class FrameDifferencingDetector(context: Context) {
             )
         }
 
-        val diffCount = current.values.indices.count { index ->
-            abs(current.values[index] - savedReference.samples[index]) > CHANGE_THRESHOLD
-        }
-        val occupancy = diffCount.toFloat() / current.values.size.toFloat()
-        val largestChangedRegion = largestChangedRegion(
+        val changeAnalysis = openCvAnalyzer.analyze(
             zoneBounds = zone.bounds,
             reference = savedReference.samples,
             current = current.values,
+        ) ?: legacyChangeAnalysis(
+            zoneBounds = zone.bounds,
+            reference = savedReference.samples,
+            current = current.values,
+        )
+        val occupancy = changeAnalysis.occupancy
+        val largestChangedRegion = applyTensorFlowLiteSecondCheck(
+            occupancy = occupancy,
+            changedRegion = changeAnalysis.largestChangedRegion,
         )
         val previous = previousSamples[zone.id]
         val motionScore = if (previous == null) {
@@ -216,6 +236,67 @@ class FrameDifferencingDetector(context: Context) {
             changedRegionBounds = changedRegionBounds,
         )
 
+    private fun legacyChangeAnalysis(
+        zoneBounds: NormalizedRect,
+        reference: IntArray,
+        current: IntArray,
+    ): ChangeAnalysis {
+        val diffCount = current.indices.count { index ->
+            abs(current[index] - reference[index]) > CHANGE_THRESHOLD
+        }
+
+        return ChangeAnalysis(
+            occupancy = diffCount.toFloat() / current.size.toFloat(),
+            largestChangedRegion = largestChangedRegion(
+                zoneBounds = zoneBounds,
+                reference = reference,
+                current = current,
+            ),
+        )
+    }
+
+    private fun applyTensorFlowLiteSecondCheck(
+        occupancy: Float,
+        changedRegion: ChangedRegion,
+    ): ChangedRegion {
+        if (changedRegion.classification != ChangeClassification.AddedObject) return changedRegion
+
+        val decision = tensorFlowLiteVerifier.verify(
+            AiVerifierInput(
+                occupancy = occupancy,
+                regionScore = changedRegion.score,
+                addedObjectScore = changedRegion.addedObjectScore,
+                removedObjectScore = changedRegion.removedObjectScore,
+                localConfidence = changedRegion.confidence,
+                classification = changedRegion.classification,
+            ),
+        )
+        if (!decision.available) return changedRegion
+
+        return if (
+            decision.classification == ChangeClassification.AddedObject &&
+            decision.confidence >= TFLITE_CONFIRMATION_THRESHOLD
+        ) {
+            changedRegion.copy(
+                addedObjectScore = max(changedRegion.addedObjectScore, decision.confidence),
+                confidence = max(changedRegion.confidence, decision.confidence),
+            )
+        } else {
+            changedRegion.copy(
+                classification = if (decision.confidence >= TFLITE_CONFIRMATION_THRESHOLD) {
+                    decision.classification
+                } else {
+                    ChangeClassification.MixedChange
+                },
+                addedObjectScore = min(changedRegion.addedObjectScore, decision.confidence),
+                confidence = min(
+                    changedRegion.confidence,
+                    decision.confidence.coerceAtMost(TFLITE_CONFIRMATION_THRESHOLD - 0.01f),
+                ),
+            )
+        }
+    }
+
     private fun largestChangedRegion(
         zoneBounds: NormalizedRect,
         reference: IntArray,
@@ -299,30 +380,51 @@ class FrameDifferencingDetector(context: Context) {
         }
 
         if (largest == 0) {
-            return ChangedRegion(
-                score = 0f,
-                bounds = null,
-                addedObjectScore = 0f,
-                removedObjectScore = 0f,
-                confidence = 0f,
-                classification = ChangeClassification.None,
-            )
+            return emptyChangedRegion()
         }
 
-        val left = zoneBounds.left + zoneBounds.width * (largestMinX.toFloat() / GRID_WIDTH.toFloat())
-        val top = zoneBounds.top + zoneBounds.height * (largestMinY.toFloat() / GRID_HEIGHT.toFloat())
-        val right = zoneBounds.left + zoneBounds.width * ((largestMaxX + 1).toFloat() / GRID_WIDTH.toFloat())
-        val bottom = zoneBounds.top + zoneBounds.height * ((largestMaxY + 1).toFloat() / GRID_HEIGHT.toFloat())
-
-        val score = largest.toFloat() / current.size.toFloat()
-        val darkerShare = largestDarker.toFloat() / largest.toFloat()
-        val brighterShare = largestBrighter.toFloat() / largest.toFloat()
-        val contrast = measureRegionContrast(
-            regionIndices = largestRegionIndices,
+        return changedRegionFromComponent(
+            zoneBounds = zoneBounds,
+            reference = reference,
+            current = current,
+            largest = largest,
             minX = largestMinX,
             minY = largestMinY,
             maxX = largestMaxX,
             maxY = largestMaxY,
+            darker = largestDarker,
+            brighter = largestBrighter,
+            regionIndices = largestRegionIndices,
+        )
+    }
+
+    private fun changedRegionFromComponent(
+        zoneBounds: NormalizedRect,
+        reference: IntArray,
+        current: IntArray,
+        largest: Int,
+        minX: Int,
+        minY: Int,
+        maxX: Int,
+        maxY: Int,
+        darker: Int,
+        brighter: Int,
+        regionIndices: IntArray,
+    ): ChangedRegion {
+        val left = zoneBounds.left + zoneBounds.width * (minX.toFloat() / GRID_WIDTH.toFloat())
+        val top = zoneBounds.top + zoneBounds.height * (minY.toFloat() / GRID_HEIGHT.toFloat())
+        val right = zoneBounds.left + zoneBounds.width * ((maxX + 1).toFloat() / GRID_WIDTH.toFloat())
+        val bottom = zoneBounds.top + zoneBounds.height * ((maxY + 1).toFloat() / GRID_HEIGHT.toFloat())
+
+        val score = largest.toFloat() / current.size.toFloat()
+        val darkerShare = darker.toFloat() / largest.toFloat()
+        val brighterShare = brighter.toFloat() / largest.toFloat()
+        val contrast = measureRegionContrast(
+            regionIndices = regionIndices,
+            minX = minX,
+            minY = minY,
+            maxX = maxX,
+            maxY = maxY,
             reference = reference,
             current = current,
         )
@@ -347,6 +449,16 @@ class FrameDifferencingDetector(context: Context) {
             classification = verifier.classification,
         )
     }
+
+    private fun emptyChangedRegion(): ChangedRegion =
+        ChangedRegion(
+            score = 0f,
+            bounds = null,
+            addedObjectScore = 0f,
+            removedObjectScore = 0f,
+            confidence = 0f,
+            classification = ChangeClassification.None,
+        )
 
     private fun classifyChange(
         regionScore: Float,
@@ -515,6 +627,283 @@ class FrameDifferencingDetector(context: Context) {
     private fun referenceFor(zone: MonitoringZone): LumaReference? =
         references.getOrPut(zone.id) { referenceStore.loadLumaReference(zone.id) }
 
+    private inner class OpenCvChangeAnalyzer {
+        private var available: Boolean? = null
+
+        fun analyze(
+            zoneBounds: NormalizedRect,
+            reference: IntArray,
+            current: IntArray,
+        ): ChangeAnalysis? {
+            if (!isAvailable()) return null
+            if (reference.size != current.size || current.size != GRID_WIDTH * GRID_HEIGHT) return null
+
+            val referenceMat = Mat(GRID_HEIGHT, GRID_WIDTH, CvType.CV_8UC1)
+            val currentMat = Mat(GRID_HEIGHT, GRID_WIDTH, CvType.CV_8UC1)
+            val diffMat = Mat()
+            val maskMat = Mat()
+            val contourMask = Mat()
+            val hierarchy = Mat()
+            val openKernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(2.0, 2.0))
+            val closeKernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(3.0, 3.0))
+            val contours = mutableListOf<MatOfPoint>()
+
+            return try {
+                referenceMat.put(0, 0, reference.toUnsignedByteArray())
+                currentMat.put(0, 0, current.toUnsignedByteArray())
+
+                org.opencv.core.Core.absdiff(currentMat, referenceMat, diffMat)
+                Imgproc.threshold(diffMat, maskMat, CHANGE_THRESHOLD.toDouble(), 255.0, Imgproc.THRESH_BINARY)
+                Imgproc.morphologyEx(maskMat, maskMat, Imgproc.MORPH_OPEN, openKernel)
+                Imgproc.morphologyEx(maskMat, maskMat, Imgproc.MORPH_CLOSE, closeKernel)
+
+                val maskBytes = ByteArray(current.size)
+                maskMat.get(0, 0, maskBytes)
+                val changedCount = maskBytes.count { value -> (value.toInt() and 0xFF) != 0 }
+                if (changedCount == 0) {
+                    ChangeAnalysis(occupancy = 0f, largestChangedRegion = emptyChangedRegion())
+                } else {
+                    maskMat.copyTo(contourMask)
+                    Imgproc.findContours(
+                        contourMask,
+                        contours,
+                        hierarchy,
+                        Imgproc.RETR_EXTERNAL,
+                        Imgproc.CHAIN_APPROX_SIMPLE,
+                    )
+                    val largestComponent = largestOpenCvComponent(
+                        maskBytes = maskBytes,
+                        contours = contours,
+                        reference = reference,
+                        current = current,
+                    )
+
+                    ChangeAnalysis(
+                        occupancy = changedCount.toFloat() / current.size.toFloat(),
+                        largestChangedRegion = largestComponent?.let { component ->
+                            changedRegionFromComponent(
+                                zoneBounds = zoneBounds,
+                                reference = reference,
+                                current = current,
+                                largest = component.size,
+                                minX = component.minX,
+                                minY = component.minY,
+                                maxX = component.maxX,
+                                maxY = component.maxY,
+                                darker = component.darker,
+                                brighter = component.brighter,
+                                regionIndices = component.indices,
+                            )
+                        } ?: emptyChangedRegion(),
+                    )
+                }
+            } catch (_: Throwable) {
+                null
+            } finally {
+                referenceMat.release()
+                currentMat.release()
+                diffMat.release()
+                maskMat.release()
+                contourMask.release()
+                hierarchy.release()
+                openKernel.release()
+                closeKernel.release()
+                contours.forEach { contour -> contour.release() }
+            }
+        }
+
+        private fun largestOpenCvComponent(
+            maskBytes: ByteArray,
+            contours: List<MatOfPoint>,
+            reference: IntArray,
+            current: IntArray,
+        ): OpenCvComponent? {
+            var largest: OpenCvComponent? = null
+
+            for (contour in contours) {
+                val rect = Imgproc.boundingRect(contour)
+                var size = 0
+                var minX = GRID_WIDTH
+                var minY = GRID_HEIGHT
+                var maxX = 0
+                var maxY = 0
+                var darker = 0
+                var brighter = 0
+                val indices = IntArray(maskBytes.size)
+
+                val right = (rect.x + rect.width).coerceAtMost(GRID_WIDTH)
+                val bottom = (rect.y + rect.height).coerceAtMost(GRID_HEIGHT)
+                for (y in rect.y.coerceAtLeast(0) until bottom) {
+                    for (x in rect.x.coerceAtLeast(0) until right) {
+                        val index = y * GRID_WIDTH + x
+                        if ((maskBytes[index].toInt() and 0xFF) == 0) continue
+
+                        indices[size] = index
+                        size++
+                        minX = min(minX, x)
+                        minY = min(minY, y)
+                        maxX = max(maxX, x)
+                        maxY = max(maxY, y)
+
+                        val delta = current[index] - reference[index]
+                        if (delta < -CHANGE_THRESHOLD) {
+                            darker++
+                        } else if (delta > CHANGE_THRESHOLD) {
+                            brighter++
+                        }
+                    }
+                }
+
+                if (size > (largest?.size ?: 0)) {
+                    largest = OpenCvComponent(
+                        size = size,
+                        minX = minX,
+                        minY = minY,
+                        maxX = maxX,
+                        maxY = maxY,
+                        darker = darker,
+                        brighter = brighter,
+                        indices = indices.copyOf(size),
+                    )
+                }
+            }
+
+            return largest?.takeIf { component -> component.size > 0 }
+        }
+
+        @Suppress("DEPRECATION")
+        private fun isAvailable(): Boolean {
+            available?.let { return it }
+            val initialized = try {
+                OpenCVLoader.initDebug()
+            } catch (_: Throwable) {
+                false
+            }
+            available = initialized
+            return initialized
+        }
+
+        private fun IntArray.toUnsignedByteArray(): ByteArray =
+            ByteArray(size) { index -> this[index].coerceIn(0, 255).toByte() }
+    }
+
+    private class TensorFlowLiteChangeVerifier(context: Context) {
+        private val interpreter: Interpreter? = loadInterpreter(context.applicationContext)
+        private val inputFeatureCount: Int? = interpreter
+            ?.getInputTensor(0)
+            ?.shape()
+            ?.flattenedFeatureCount()
+        private val outputClassCount: Int? = interpreter
+            ?.getOutputTensor(0)
+            ?.shape()
+            ?.flattenedFeatureCount()
+
+        fun verify(input: AiVerifierInput): AiVerifierDecision {
+            val activeInterpreter = interpreter ?: return AiVerifierDecision.Unavailable
+            val featureCount = inputFeatureCount ?: return AiVerifierDecision.Unavailable
+            val classCount = outputClassCount ?: return AiVerifierDecision.Unavailable
+            if (featureCount !in 1..MAX_TFLITE_FEATURES) return AiVerifierDecision.Unavailable
+            if (classCount !in 2..MAX_TFLITE_OUTPUT_CLASSES) return AiVerifierDecision.Unavailable
+            if (activeInterpreter.getInputTensor(0).dataType() != DataType.FLOAT32) {
+                return AiVerifierDecision.Unavailable
+            }
+            if (activeInterpreter.getOutputTensor(0).dataType() != DataType.FLOAT32) {
+                return AiVerifierDecision.Unavailable
+            }
+
+            return try {
+                val inputBuffer = ByteBuffer
+                    .allocateDirect(featureCount * FLOAT_BYTES)
+                    .order(ByteOrder.nativeOrder())
+                input.toFeatureArray(featureCount).forEach { value -> inputBuffer.putFloat(value) }
+                inputBuffer.rewind()
+
+                val output = Array(1) { FloatArray(classCount) }
+                activeInterpreter.run(inputBuffer, output)
+                val probabilities = output.first()
+                val bestIndex = probabilities.indices.maxBy { index -> probabilities[index] }
+
+                AiVerifierDecision(
+                    available = true,
+                    classification = classForIndex(bestIndex, classCount),
+                    confidence = probabilities[bestIndex].coerceIn(0f, 1f),
+                )
+            } catch (_: Throwable) {
+                AiVerifierDecision.Unavailable
+            }
+        }
+
+        private fun AiVerifierInput.toFeatureArray(featureCount: Int): FloatArray {
+            val baseFeatures = floatArrayOf(
+                occupancy,
+                regionScore,
+                addedObjectScore,
+                removedObjectScore,
+                localConfidence,
+                if (classification == ChangeClassification.AddedObject) 1f else 0f,
+                if (classification == ChangeClassification.RemovedReferenceObject) 1f else 0f,
+                if (classification == ChangeClassification.LightingChange) 1f else 0f,
+                if (classification == ChangeClassification.MixedChange) 1f else 0f,
+            )
+            return FloatArray(featureCount) { index ->
+                baseFeatures.getOrElse(index) { 0f }
+            }
+        }
+
+        private fun classForIndex(index: Int, classCount: Int): ChangeClassification =
+            if (classCount == 4) {
+                when (index) {
+                    0 -> ChangeClassification.AddedObject
+                    1 -> ChangeClassification.RemovedReferenceObject
+                    2 -> ChangeClassification.LightingChange
+                    else -> ChangeClassification.MixedChange
+                }
+            } else {
+                when (index) {
+                    1 -> ChangeClassification.AddedObject
+                    2 -> ChangeClassification.RemovedReferenceObject
+                    3 -> ChangeClassification.LightingChange
+                    4 -> ChangeClassification.MixedChange
+                    else -> ChangeClassification.None
+                }
+            }
+
+        private fun loadInterpreter(context: Context): Interpreter? =
+            loadModel(context)?.let { model ->
+                try {
+                    Interpreter(
+                        model,
+                        Interpreter.Options().apply { setNumThreads(TFLITE_THREAD_COUNT) },
+                    )
+                } catch (_: Throwable) {
+                    null
+                }
+            }
+
+        private fun loadModel(context: Context): MappedByteBuffer? =
+            try {
+                context.assets.openFd(TFLITE_MODEL_ASSET).use { descriptor ->
+                    descriptor.mapReadOnly()
+                }
+            } catch (_: Throwable) {
+                null
+            }
+
+        private fun AssetFileDescriptor.mapReadOnly(): MappedByteBuffer =
+            FileInputStream(fileDescriptor).use { input ->
+                input.channel.use { channel ->
+                    channel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
+                }
+            }
+
+        private fun IntArray.flattenedFeatureCount(): Int? {
+            if (isEmpty()) return null
+            val dimensions = if (size > 1) drop(1) else asList()
+            if (dimensions.isEmpty() || dimensions.any { dimension -> dimension <= 0 }) return null
+            return dimensions.fold(1) { total, dimension -> total * dimension }
+        }
+    }
+
     data class LumaReference(
         val width: Int,
         val height: Int,
@@ -531,6 +920,11 @@ class FrameDifferencingDetector(context: Context) {
         }
     }
 
+    private data class ChangeAnalysis(
+        val occupancy: Float,
+        val largestChangedRegion: ChangedRegion,
+    )
+
     private data class ChangedRegion(
         val score: Float,
         val bounds: NormalizedRect?,
@@ -539,6 +933,40 @@ class FrameDifferencingDetector(context: Context) {
         val confidence: Float,
         val classification: ChangeClassification,
     )
+
+    private data class OpenCvComponent(
+        val size: Int,
+        val minX: Int,
+        val minY: Int,
+        val maxX: Int,
+        val maxY: Int,
+        val darker: Int,
+        val brighter: Int,
+        val indices: IntArray,
+    )
+
+    private data class AiVerifierInput(
+        val occupancy: Float,
+        val regionScore: Float,
+        val addedObjectScore: Float,
+        val removedObjectScore: Float,
+        val localConfidence: Float,
+        val classification: ChangeClassification,
+    )
+
+    private data class AiVerifierDecision(
+        val available: Boolean,
+        val classification: ChangeClassification,
+        val confidence: Float,
+    ) {
+        companion object {
+            val Unavailable = AiVerifierDecision(
+                available = false,
+                classification = ChangeClassification.None,
+                confidence = 0f,
+            )
+        }
+    }
 
     private data class LocalVerifierResult(
         val classification: ChangeClassification,
@@ -571,6 +999,12 @@ class FrameDifferencingDetector(context: Context) {
         const val STRONG_CONTRAST_GAP = 0.16f
         const val MIN_OBJECT_CONTRAST = 0.055f
         const val DEFAULT_TABLE_ZONE_ID = "packing-table"
+        const val TFLITE_MODEL_ASSET = "leftover_verifier.tflite"
+        const val TFLITE_CONFIRMATION_THRESHOLD = 0.55f
+        const val TFLITE_THREAD_COUNT = 2
+        const val MAX_TFLITE_FEATURES = 64
+        const val MAX_TFLITE_OUTPUT_CLASSES = 8
+        const val FLOAT_BYTES = 4
     }
 
     private class ReferenceStore(context: Context) {

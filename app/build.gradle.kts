@@ -42,6 +42,10 @@ android {
     buildFeatures {
         compose = true
     }
+
+    androidResources {
+        noCompress += "tflite"
+    }
 }
 
 kapt {
@@ -76,6 +80,8 @@ dependencies {
     implementation(libs.androidx.room.ktx)
     implementation(libs.androidx.room.runtime)
     implementation(libs.hilt.android)
+    implementation(libs.opencv)
+    implementation(libs.tensorflow.lite)
 
     kapt(libs.androidx.room.compiler)
     kapt(libs.hilt.compiler)

@@ -2,6 +2,9 @@ package com.aipackingmonitor.ui.monitoring
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Typeface
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -44,8 +47,12 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -53,6 +60,7 @@ import com.aipackingmonitor.domain.model.DetectionResult
 import com.aipackingmonitor.domain.model.MonitoringState
 import com.aipackingmonitor.domain.model.MonitoringZone
 import com.aipackingmonitor.domain.model.NormalizedRect
+import com.aipackingmonitor.domain.model.ZoneType
 import com.aipackingmonitor.vision.FrameDifferencingDetector
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -406,6 +414,7 @@ private fun ZoneOverlay(
             width = size.width * zone.bounds.width,
             height = size.height * zone.bounds.height,
         )
+        val label = zone.cameraOverlayLabel()
         drawRect(
             color = color.copy(alpha = 0.16f),
             topLeft = Offset(left, top),
@@ -416,6 +425,12 @@ private fun ZoneOverlay(
             topLeft = Offset(left, top),
             size = rectSize,
             style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Square),
+        )
+        drawZoneLabel(
+            label = label,
+            color = color,
+            left = left,
+            top = top,
         )
         if (setupActive) {
             val handleRadius = 7.dp.toPx()
@@ -454,3 +469,49 @@ private fun ZoneOverlay(
         }
     }
 }
+
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawZoneLabel(
+    label: String,
+    color: Color,
+    left: Float,
+    top: Float,
+) {
+    val labelPaddingX = 8.dp.toPx()
+    val labelPaddingY = 5.dp.toPx()
+    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        this.color = android.graphics.Color.WHITE
+        textSize = 14.sp.toPx()
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+    }
+    val backgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        this.color = color.copy(alpha = 0.92f).toArgb()
+    }
+    val fontMetrics = textPaint.fontMetrics
+    val textWidth = textPaint.measureText(label)
+    val labelWidth = textWidth + labelPaddingX * 2f
+    val labelHeight = (fontMetrics.descent - fontMetrics.ascent) + labelPaddingY * 2f
+    val labelLeft = left.coerceIn(0f, (size.width - labelWidth).coerceAtLeast(0f))
+    val outsideTop = top - labelHeight - 4.dp.toPx()
+    val labelTop = if (outsideTop >= 0f) outsideTop else top + 4.dp.toPx()
+    val labelRect = RectF(
+        labelLeft,
+        labelTop,
+        labelLeft + labelWidth,
+        labelTop + labelHeight,
+    )
+    val cornerRadius = 6.dp.toPx()
+    val baseline = labelTop + labelPaddingY - fontMetrics.ascent
+
+    drawIntoCanvas { canvas ->
+        canvas.nativeCanvas.drawRoundRect(labelRect, cornerRadius, cornerRadius, backgroundPaint)
+        canvas.nativeCanvas.drawText(label, labelLeft + labelPaddingX, baseline, textPaint)
+    }
+}
+
+private fun MonitoringZone.cameraOverlayLabel(): String =
+    when {
+        id == DefaultPackingZone.id -> "Table 1"
+        id == DefaultCartZone.id -> "Cart 1"
+        type == ZoneType.PackingTable -> name.replace("Packing table", "Table", ignoreCase = true)
+        else -> name
+    }
